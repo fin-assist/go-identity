@@ -11,6 +11,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 type testStream struct {
@@ -58,5 +61,23 @@ func TestStreamChecksEveryMessage(t *testing.T) {
 	}
 	if _, e = SystemUserID(userCtx, "victim"); e == nil {
 		t.Fatal("user promoted to system")
+	}
+}
+
+func TestRequestSchemaGuard(t *testing.T) {
+	s := serverForTest(t)
+	ctx, e := s.admit(incoming("bank-bff", "access"), "/test.Service/Method")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.request(ctx, struct{}{}); e != nil {
+		t.Fatal(e)
+	}
+	descriptor, e := protodesc.NewFile(&descriptorpb.FileDescriptorProto{Name: proto.String("test.proto"), Syntax: proto.String("proto3"), MessageType: []*descriptorpb.DescriptorProto{{Name: proto.String("Request"), Field: []*descriptorpb.FieldDescriptorProto{{Name: proto.String("user_id"), Number: proto.Int32(1), Type: descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum()}}}}}, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.request(ctx, dynamicpb.NewMessage(descriptor.Messages().Get(0))); status.Code(e) != codes.PermissionDenied {
+		t.Fatal("invalid user_id schema admitted", e)
 	}
 }

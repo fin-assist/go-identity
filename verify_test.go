@@ -417,3 +417,44 @@ func TestConstructors(t *testing.T) {
 		}
 	}
 }
+
+func TestAdditionalKeyValidation(t *testing.T) {
+	pub, _ := testKey(t)
+	valid := string(jwks(t, map[string]ed25519.PublicKey{"one": pub}))
+	if _, e := parseJWKS([]byte(strings.Replace(valid, `"kty":"OKP"`, `"key_ops":["verify"],"use":"sig","kty":"OKP"`, 1))); e != nil {
+		t.Fatal(e)
+	}
+	enc := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+	for _, key := range []map[string]string{
+		{"kid": "k", "kty": "OKP", "crv": "Ed25519", "x": "bad!"},
+		{"kid": "k", "kty": "EC", "crv": "P-256", "x": enc(make([]byte, 32)), "y": enc(make([]byte, 32))},
+		{"kid": "k", "kty": "RSA", "n": enc(append([]byte{128}, make([]byte, 255)...)), "e": "Ag"},
+		{"kid": "k", "kty": "RSA", "n": enc(make([]byte, 256)), "e": "Aw"},
+	} {
+		data, _ := json.Marshal(map[string]any{"keys": []any{key}})
+		if _, e := parseJWKS(data); e == nil {
+			t.Fatal("bad JWK accepted")
+		}
+	}
+	now := time.Unix(1, 0)
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { return nil, nil }), func() time.Time { return now }, time.Minute)
+	if _, e := NewUserVerifier(cache, VerifyOptions{}); e == nil {
+		t.Fatal("user invalid options")
+	}
+	if _, e := NewKubernetesVerifier(cache, VerifyOptions{Audience: "finassist-internal"}, "finassist"); e == nil {
+		t.Fatal("service invalid options")
+	}
+	_, private := testKey(t)
+	o := VerifyOptions{Issuer: "stage", Audience: "finassist-internal", Clock: func() time.Time { return now }}
+	v, e := NewStageVerifier("stage", o, map[string]ed25519.PublicKey{"bank-bff": pub})
+	if e != nil {
+		t.Fatal(e)
+	}
+	c := baseClaims(now)
+	c.Issuer = "stage"
+	c.Audience = jwt.ClaimStrings{"finassist-internal"}
+	c.Subject = "assistant"
+	if _, e = v.VerifyService(context.Background(), sign(t, private, jwt.SigningMethodEdDSA, "assistant", c)); e == nil {
+		t.Fatal("unknown stage key")
+	}
+}
