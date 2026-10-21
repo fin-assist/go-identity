@@ -276,7 +276,7 @@ func TestKeyCacheConcurrentAndCancelled(t *testing.T) {
 	c, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) {
 		calls.Add(1)
 		return jwks(t, map[string]ed25519.PublicKey{"one": p}), nil
-	}), func() time.Time { return now }, time.Minute)
+	}), func() time.Time { return now }, 2*time.Minute)
 	var wg sync.WaitGroup
 	for range 30 {
 		wg.Go(func() {
@@ -438,7 +438,7 @@ func TestAdditionalKeyValidation(t *testing.T) {
 		}
 	}
 	now := time.Unix(1, 0)
-	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { return nil, nil }), func() time.Time { return now }, time.Minute)
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { return nil, nil }), func() time.Time { return now }, 2*time.Minute)
 	if _, e := NewUserVerifier(cache, VerifyOptions{}); e == nil {
 		t.Fatal("user invalid options")
 	}
@@ -570,11 +570,11 @@ func TestRefreshSurvivesRequestCancellation(t *testing.T) {
 					}
 				}
 				return data, nil
-			}), func() time.Time { return now }, time.Minute)
+			}), func() time.Time { return now }, 2*time.Minute)
 			if _, e := cache.key(context.Background(), "one"); e != nil {
 				t.Fatal(e)
 			}
-			now = now.Add(time.Minute)
+			now = now.Add(2 * time.Minute)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if during {
@@ -638,7 +638,7 @@ func TestClockSkewDoesNotExtendExpiration(t *testing.T) {
 
 func TestRefreshWaiterCancellation(t *testing.T) {
 	now := time.Unix(1, 0)
-	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { t.Fatal("waiter started another fetch"); return nil, nil }), func() time.Time { return now }, time.Minute)
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { t.Fatal("waiter started another fetch"); return nil, nil }), func() time.Time { return now }, 2*time.Minute)
 	cache.gate <- struct{}{}
 	defer func() { <-cache.gate }()
 	parent, cancel := context.WithCancel(context.Background())
@@ -663,5 +663,109 @@ func TestRefreshWaiterCancellation(t *testing.T) {
 	}
 	if cache.hasAttempt {
 		t.Fatal("cancelled waiter consumed refresh slot")
+	}
+}
+
+func TestProactiveRefreshRetriesWithinSnapshotLifetime(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	pub, _ := testKey(t)
+	data := jwks(t, map[string]ed25519.PublicKey{"one": pub})
+	calls := 0
+	fail := false
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) {
+		calls++
+		if fail {
+			return nil, errors.New("rolling deployment")
+		}
+		return data, nil
+	}), func() time.Time { return now }, 10*time.Minute)
+	cache.refreshIfDue(context.Background())
+	if calls != 1 {
+		t.Fatal("missing initial refresh")
+	}
+	now = now.Add(5*time.Minute - time.Nanosecond)
+	cache.refreshIfDue(context.Background())
+	if calls != 1 {
+		t.Fatal("refreshed before proactive boundary")
+	}
+	now = now.Add(time.Nanosecond)
+	fail = true
+	cache.refreshIfDue(context.Background())
+	if calls != 2 {
+		t.Fatal("did not proactively refresh at half age")
+	}
+	if _, e := cache.key(context.Background(), "one"); e != nil {
+		t.Fatal("one proactive failure rejected known key", e)
+	}
+	now = now.Add(time.Minute)
+	fail = false
+	cache.refreshIfDue(context.Background())
+	if calls != 3 {
+		t.Fatal("did not retry next minute")
+	}
+	now = now.Add(5*time.Minute - time.Nanosecond)
+	cache.refreshIfDue(context.Background())
+	if calls != 3 {
+		t.Fatal("successful refresh did not reset schedule")
+	}
+	if _, e := cache.key(context.Background(), "one"); e != nil {
+		t.Fatal("replacement snapshot unavailable", e)
+	}
+}
+
+func TestKeyCacheRunControlledTicks(t *testing.T) {
+	var instant atomic.Int64
+	instant.Store(time.Unix(1700000000, 0).UnixNano())
+	clock := func() time.Time { return time.Unix(0, instant.Load()) }
+	pub, _ := testKey(t)
+	data := jwks(t, map[string]ed25519.PublicKey{"one": pub})
+	fetched := make(chan struct{}, 2)
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { fetched <- struct{}{}; return data, nil }), clock, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticks := make(chan time.Time)
+	done := make(chan error, 1)
+	go func() { done <- cache.run(ctx, ticks) }()
+	select {
+	case <-fetched:
+	case <-ctx.Done():
+		t.Fatal("initial job load absent")
+	}
+	// Wait for publication of the first fetch before moving the injected clock.
+	select {
+	case cache.gate <- struct{}{}:
+		<-cache.gate
+	case <-ctx.Done():
+		t.Fatal("initial publication stuck")
+	}
+	instant.Add(int64(5 * time.Minute))
+	select {
+	case ticks <- clock():
+	case <-ctx.Done():
+		t.Fatal("job not listening for ticks")
+	}
+	select {
+	case <-fetched:
+	case <-ctx.Done():
+		t.Fatal("tick did not refresh")
+	}
+	cancel()
+	select {
+	case e := <-done:
+		if !errors.Is(e, context.Canceled) {
+			t.Fatal(e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not stop")
+	}
+}
+
+func TestKeyCacheMinimumAgeAllowsProactiveRefresh(t *testing.T) {
+	provider := providerFunc(func(context.Context) ([]byte, error) { return nil, nil })
+	if _, e := NewKeyCache(provider, time.Now, time.Minute); e == nil {
+		t.Fatal("snapshot age leaves no room before refresh limit")
+	}
+	if _, e := NewKeyCache(provider, time.Now, 2*time.Minute); e != nil {
+		t.Fatal(e)
 	}
 }

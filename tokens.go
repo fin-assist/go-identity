@@ -127,13 +127,13 @@ func (s *StageSource) Token(ctx context.Context) (string, error) {
 	if s.token != "" && now.Before(s.expires.Add(-s.options.TTL/5)) {
 		return s.token, nil
 	}
-	exp := now.Add(s.options.TTL)
-	t := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.RegisteredClaims{Subject: s.options.Caller, Issuer: s.options.Issuer, Audience: jwt.ClaimStrings{"finassist-internal"}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(exp)})
+	exp := jwt.NewNumericDate(now.Add(s.options.TTL))
+	t := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.RegisteredClaims{Subject: s.options.Caller, Issuer: s.options.Issuer, Audience: jwt.ClaimStrings{"finassist-internal"}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: exp})
 	t.Header["kid"] = s.options.Caller
 	raw, err := t.SignedString(s.key)
 	if err != nil {
 		return "", errors.New("identity: stage signing failed")
 	}
-	s.token, s.expires = raw, exp
+	s.token, s.expires = raw, exp.Time
 	return raw, nil
 }

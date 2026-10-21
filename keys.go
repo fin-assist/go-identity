@@ -42,10 +42,10 @@ type KeyCache struct {
 	hasAttempt         bool
 }
 
-// NewKeyCache requires a provider, an injected clock and an interval of at least
-// one minute (10 minutes for user keys, one hour for Kubernetes keys).
+// NewKeyCache requires a provider, an injected clock and a maximum snapshot age of at least
+// two minutes (10 minutes for user keys, one hour for Kubernetes keys).
 func NewKeyCache(provider JWKSProvider, clock func() time.Time, interval time.Duration) (*KeyCache, error) {
-	if provider == nil || clock == nil || interval < time.Minute {
+	if provider == nil || clock == nil || interval < 2*time.Minute {
 		return nil, errors.New("identity: invalid key cache options")
 	}
 	return &KeyCache{provider: provider, clock: clock, interval: interval, gate: make(chan struct{}, 1)}, nil
@@ -111,18 +111,33 @@ func (c *KeyCache) refresh(ctx context.Context) error {
 	return nil
 }
 
-// Run refreshes keys periodically until ctx ends. The service owns this job and
-// its lifetime. Initial/failed loads also retry on demand, with the same limit.
+// Run proactively refreshes a snapshot at half its maximum age, checking once a
+// minute. Failed loads retry on the next minute while the old snapshot is still
+// valid. The service owns this job; cancellation waits at most five seconds for
+// an already started shared fetch. The return value is ctx.Err().
 func (c *KeyCache) Run(ctx context.Context) error {
-	_ = c.refresh(ctx)
-	ticker := time.NewTicker(c.interval)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
+	return c.run(ctx, ticker.C)
+}
+
+func (c *KeyCache) refreshIfDue(ctx context.Context) {
+	c.mu.RLock()
+	due := c.keys == nil || c.clock().Sub(c.updated) >= c.interval/2
+	c.mu.RUnlock()
+	if due {
+		_ = c.refresh(ctx)
+	}
+}
+
+func (c *KeyCache) run(ctx context.Context, ticks <-chan time.Time) error {
+	c.refreshIfDue(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			_ = c.refresh(ctx)
+		case <-ticks:
+			c.refreshIfDue(ctx)
 		}
 	}
 }

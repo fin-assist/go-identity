@@ -154,3 +154,35 @@ func TestProjectedRotation(t *testing.T) {
 		t.Fatal("cancel ignored")
 	}
 }
+
+func TestStageSourceShortFractionalTTL(t *testing.T) {
+	now := time.Unix(1700000000, 900000000)
+	pub, key := testKey(t)
+	clock := func() time.Time { return now }
+	source, e := NewStageSource("stage", StageOptions{KeyFile: writeKey(t, key), Caller: "bank-bff", Issuer: "stage", Clock: clock, TTL: time.Second})
+	if e != nil {
+		t.Fatal(e)
+	}
+	verifier, e := NewStageVerifier("stage", VerifyOptions{Issuer: "stage", Audience: "finassist-internal", Clock: clock}, map[string]ed25519.PublicKey{"bank-bff": pub})
+	if e != nil {
+		t.Fatal(e)
+	}
+	first, e := source.Token(context.Background())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = verifier.VerifyService(context.Background(), first); e != nil {
+		t.Fatal("fresh short token rejected", e)
+	}
+	now = now.Add(200 * time.Millisecond)
+	if _, e = verifier.VerifyService(context.Background(), first); e == nil {
+		t.Fatal("old token should have expired")
+	}
+	next, e := source.Token(context.Background())
+	if e != nil || next == first {
+		t.Fatal("expired short token stayed cached", e)
+	}
+	if _, e = verifier.VerifyService(context.Background(), next); e != nil {
+		t.Fatal("source returned expired token", e)
+	}
+}
