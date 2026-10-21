@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,7 +59,7 @@ func TestHTTPKeysTLS(t *testing.T) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer server.Close()
-	p, e := NewHTTPKeys(server.Client(), server.URL+"/jwks")
+	p, e := NewHTTPKeys(server.Client(), server.URL+"/jwks", nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -84,11 +86,62 @@ func TestHTTPKeysTLS(t *testing.T) {
 		t.Fatal("cancel ignored")
 	}
 	for _, address := range []string{"http://example.com", "https://u:p@example.com", "https://example.com?secret=1", "https://example.com/#fragment", "://bad"} {
-		if _, e = NewHTTPKeys(server.Client(), address); e == nil {
+		if _, e = NewHTTPKeys(server.Client(), address, nil); e == nil {
 			t.Fatal(address)
 		}
 	}
-	if _, e = NewHTTPKeys(nil, server.URL); e == nil {
+	if _, e = NewHTTPKeys(nil, server.URL, nil); e == nil {
 		t.Fatal("nil client")
+	}
+}
+
+func TestHTTPKeysAuthenticatedAndRotating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "api-token")
+	if e := os.WriteFile(path, []byte("api-one"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	source, _ := NewProjectedSource(path)
+	expected := "Bearer api-one"
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Authorization") != expected {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte("keys"))
+	}))
+	defer server.Close()
+	anonymous, _ := NewHTTPKeys(server.Client(), server.URL, nil)
+	if _, e := anonymous.JWKS(context.Background()); e == nil {
+		t.Fatal("anonymous keys fetch accepted")
+	}
+	auth, e := NewHTTPKeys(server.Client(), server.URL, source)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if b, e := auth.JWKS(context.Background()); e != nil || string(b) != "keys" {
+		t.Fatal(string(b), e)
+	}
+	replacement := path + ".new"
+	if e = os.WriteFile(replacement, []byte("api-two"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Rename(replacement, path); e != nil {
+		t.Fatal(e)
+	}
+	expected = "Bearer api-two"
+	if _, e = auth.JWKS(context.Background()); e != nil {
+		t.Fatal("rotated API credential not used", e)
+	}
+	for _, bad := range []TokenSource{tokenFunc(func(context.Context) (string, error) { return "", errors.New("secret credential path") }), tokenFunc(func(context.Context) (string, error) { return "line\nbreak", nil })} {
+		auth, _ = NewHTTPKeys(server.Client(), server.URL, bad)
+		before := calls
+		if _, e = auth.JWKS(context.Background()); e == nil || strings.Contains(e.Error(), "secret") {
+			t.Fatal(e)
+		}
+		if calls != before {
+			t.Fatal("request sent with invalid credential")
+		}
 	}
 }

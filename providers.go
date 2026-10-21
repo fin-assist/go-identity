@@ -39,19 +39,22 @@ func (p UserKeys) JWKS(ctx context.Context) ([]byte, error) {
 type HTTPKeys struct {
 	client http.Client
 	url    string
+	source TokenSource
 }
 
 // NewHTTPKeys copies a service-owned client, keeping its TLS trust configuration.
 // The URL must be HTTPS without credentials, query or fragment. Never disable TLS
 // verification; install the cluster CA in the client's transport instead.
-func NewHTTPKeys(client *http.Client, address string) (*HTTPKeys, error) {
+// source, when non-nil, supplies an API-server-audience token on each fetch.
+// Kubernetes normally requires it; do not use the finassist-internal token.
+func NewHTTPKeys(client *http.Client, address string, source TokenSource) (*HTTPKeys, error) {
 	u, err := url.Parse(address)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || client == nil {
 		return nil, errors.New("identity: pinned HTTPS JWKS URL and client required")
 	}
 	c := *client
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &HTTPKeys{c, address}, nil
+	return &HTTPKeys{client: c, url: address, source: source}, nil
 }
 
 // JWKS fetches a bounded successful response; errors contain no URL or body.
@@ -59,6 +62,16 @@ func (p *HTTPKeys) JWKS(ctx context.Context) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
 	if err != nil {
 		return nil, errors.New("identity: invalid JWKS request")
+	}
+	if p.source != nil {
+		token, err := p.source.Token(ctx)
+		if err != nil {
+			return nil, errors.New("identity: JWKS credential unavailable")
+		}
+		if _, ok := bearer([]string{"Bearer " + token}); !ok {
+			return nil, errors.New("identity: invalid JWKS credential")
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	r, err := p.client.Do(req)
 	if err != nil {

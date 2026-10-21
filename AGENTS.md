@@ -50,8 +50,8 @@ the PR with why it is needed: every service that imports the library inherits it
 
 ## Identity implementation
 
-- `KeyCache` takes a `JWKSProvider`; `UserKeys` uses the generated user client, `HTTPKeys` pins an HTTPS Kubernetes endpoint. Refresh is serialized, bounded and limited even on failure.
-- User access tokens: Ed25519 / ES256, required exp/iss/aud/sub; errors use `finerr.InvalidToken` (including expired access tokens). Kubernetes additionally binds namespace, serviceaccount name and sub. Stage keys bind kid=sub to one service, and both stage constructors reject prod/unknown environments.
+- `KeyCache` takes a `JWKSProvider`; `UserKeys` uses the generated user client, `HTTPKeys` pins an HTTPS Kubernetes endpoint. Refresh is serialized, bounded and limited even on failure; the shared 5-second fetch survives cancellation of its triggering request. HTTPKeys can use a separate rotating API-server-audience TokenSource.
+- User access tokens: Ed25519 / ES256, required exp/iss/aud/sub; iat/nbf allow 5 seconds of skew while exp stays strict; errors use `finerr.InvalidToken` (including expired access tokens). Kubernetes additionally binds namespace, serviceaccount name and sub. Stage keys bind kid=sub to one service, and both stage constructors reject prod/unknown environments.
 - `Server` copies an exact method/caller/model table. `UserID` is only a verified sub; `SystemUserID` accepts a request field only after System admission. Streams check identity on admission and user_id on each RecvMsg. Client interceptors forward only a package-verified access token.
 - Integration/usage tests use TLS httptest, actual files and generated gRPC clients on bufconn; this library has no database or migrations and requires no PostgreSQL.
 - Services migrating from the template must adapt its context accessors/tombstone chain; the library context is distinct. See README bootstrap and wiring.

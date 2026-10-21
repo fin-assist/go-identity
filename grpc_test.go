@@ -445,3 +445,71 @@ func TestUsageKubernetesSystemCall(t *testing.T) {
 		t.Fatal("rejected call reached handler")
 	}
 }
+
+func TestUsageDeniedUserAndCaller(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	userPub, userKey := testKey(t)
+	bffPub, bffKey := testKey(t)
+	otherPub, otherKey := testKey(t)
+	o := VerifyOptions{Issuer: "stage", Audience: "finassist-internal", Clock: func() time.Time { return now }}
+	services, e := NewStageVerifier("stage", o, map[string]ed25519.PublicKey{"bank-bff": bffPub, "assistant": otherPub})
+	if e != nil {
+		t.Fatal(e)
+	}
+	users := userVerifier(t, userPub, &now)
+	method := analyticsv1.AnalyticsService_GetAnalytics_FullMethodName
+	auth, e := NewServer(AccessTable{method: {"bank-bff": User}}, services, users, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	api := &analyticsAPI{t: t}
+	server := grpc.NewServer(grpc.ChainUnaryInterceptor(auth.Unary()))
+	analyticsv1.RegisterAnalyticsServiceServer(server, api)
+	c := baseClaims(now)
+	c.Issuer = "stage"
+	c.Audience = jwt.ClaimStrings{"finassist-internal"}
+	c.Subject = "bank-bff"
+	serviceToken := sign(t, bffKey, jwt.SigningMethodEdDSA, "bank-bff", c)
+	conn := dialServer(t, server, tokenFunc(func(context.Context) (string, error) { return serviceToken, nil }))
+	client := analyticsv1.NewAnalyticsServiceClient(conn)
+	accessToken := sign(t, userKey, jwt.SigningMethodEdDSA, "one", baseClaims(now))
+	httpAuth, _ := NewHTTP(users, func(w http.ResponseWriter, _ *http.Request, _ error) { w.WriteHeader(401) })
+	cases := []struct {
+		name, userID               string
+		foreignCaller, missingRule bool
+	}{{name: "foreign user_id", userID: "victim"}, {name: "foreign verified caller", foreignCaller: true}, {name: "method without rule", missingRule: true}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.foreignCaller {
+				c.Subject = "assistant"
+				serviceToken = sign(t, otherKey, jwt.SigningMethodEdDSA, "assistant", c)
+			} else {
+				c.Subject = "bank-bff"
+				serviceToken = sign(t, bffKey, jwt.SigningMethodEdDSA, "bank-bff", c)
+			}
+			handler := httpAuth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var e error
+				if tc.missingRule {
+					_, e = client.ListPeriods(r.Context(), &analyticsv1.ListPeriodsRequest{})
+				} else {
+					req := &analyticsv1.GetAnalyticsRequest{}
+					if tc.userID != "" {
+						req.UserId = proto.String(tc.userID)
+					}
+					_, e = client.GetAnalytics(r.Context(), req)
+				}
+				if status.Code(e) != codes.PermissionDenied || len(status.Convert(e).Details()) != 0 {
+					t.Errorf("not a bare PERMISSION_DENIED: %v", e)
+				}
+				w.WriteHeader(403)
+			}))
+			r := httptest.NewRequest("GET", "/v1/analytics", nil)
+			r.Header.Set("Authorization", "Bearer "+accessToken)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != 403 || api.calls.Load() != 0 {
+				t.Fatal("denied request processed", w.Code, api.calls.Load())
+			}
+		})
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -105,8 +106,8 @@ func TestUserTokens(t *testing.T) {
 		{name: "wrong issuer", mutate: func(c *jwt.RegisteredClaims) { c.Issuer = "other" }},
 		{name: "empty subject", mutate: func(c *jwt.RegisteredClaims) { c.Subject = " " }},
 		{name: "long subject", mutate: func(c *jwt.RegisteredClaims) { c.Subject = strings.Repeat("s", 257) }},
-		{name: "future iat", mutate: func(c *jwt.RegisteredClaims) { c.IssuedAt = jwt.NewNumericDate(now.Add(time.Second)) }},
-		{name: "future nbf", mutate: func(c *jwt.RegisteredClaims) { c.NotBefore = jwt.NewNumericDate(now.Add(time.Second)) }},
+		{name: "future iat", mutate: func(c *jwt.RegisteredClaims) { c.IssuedAt = jwt.NewNumericDate(now.Add(clockSkew + time.Second)) }},
+		{name: "future nbf", mutate: func(c *jwt.RegisteredClaims) { c.NotBefore = jwt.NewNumericDate(now.Add(clockSkew + time.Second)) }},
 		{name: "bad signature", key: foreign}, {name: "unknown kid", kid: "unknown"},
 		{name: "symmetric confusion", key: []byte(pub), method: jwt.SigningMethodHS256},
 		{name: "none", key: jwt.UnsafeAllowNoneSignatureType, method: jwt.SigningMethodNone},
@@ -456,5 +457,211 @@ func TestAdditionalKeyValidation(t *testing.T) {
 	c.Subject = "assistant"
 	if _, e = v.VerifyService(context.Background(), sign(t, private, jwt.SigningMethodEdDSA, "assistant", c)); e == nil {
 		t.Fatal("unknown stage key")
+	}
+}
+
+// arrivalContext reports when a request reaches the refresh select. This lets the
+// test hold the provider until every concurrent request has actually arrived,
+// without timing sleeps or relying on goroutine scheduling.
+type arrivalContext struct {
+	context.Context
+	arrived chan<- struct{}
+	once    sync.Once
+}
+
+func (c *arrivalContext) Done() <-chan struct{} {
+	c.once.Do(func() { c.arrived <- struct{}{} })
+	return c.Context.Done()
+}
+
+func TestUnknownKeyConcurrentFailedRefresh(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	var calls atomic.Int32
+	held := make(chan struct{})
+	entered := make(chan struct{})
+	arrived := make(chan struct{}, 24)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cache, e := NewKeyCache(providerFunc(func(ctx context.Context) ([]byte, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		select {
+		case <-held:
+			return nil, errors.New("upstream secret")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}), func() time.Time { return now }, 10*time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 24 {
+		wg.Go(func() {
+			<-start
+			requestCtx := &arrivalContext{Context: ctx, arrived: arrived}
+			if _, e := cache.key(requestCtx, "unknown"); e == nil {
+				t.Error("unknown key admitted after failed refresh")
+			}
+		})
+	}
+	close(start)
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("provider did not start")
+	}
+	for range 24 {
+		select {
+		case <-arrived:
+		case <-ctx.Done():
+			t.Fatal("requests did not reach held refresh")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Errorf("parallel provider calls: %d", calls.Load())
+	}
+	close(held)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("waiters did not finish")
+	}
+	for range 24 {
+		if _, e := cache.key(ctx, "another-unknown"); e == nil {
+			t.Fatal("unknown key admitted")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("failed refresh retried before limit: %d", calls.Load())
+	}
+	now = now.Add(time.Minute)
+	if _, e := cache.key(ctx, "unknown"); e == nil {
+		t.Fatal("failed refresh admitted")
+	}
+	if calls.Load() != 2 {
+		t.Fatal("refresh did not retry after limit")
+	}
+}
+
+func TestRefreshSurvivesRequestCancellation(t *testing.T) {
+	for _, during := range []bool{false, true} {
+		t.Run(fmt.Sprint("during_fetch=", during), func(t *testing.T) {
+			now := time.Unix(1700000000, 0)
+			pub, _ := testKey(t)
+			data := jwks(t, map[string]ed25519.PublicKey{"one": pub})
+			var calls atomic.Int32
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			cache, _ := NewKeyCache(providerFunc(func(ctx context.Context) ([]byte, error) {
+				if calls.Add(1) == 2 && during {
+					close(entered)
+					select {
+					case <-release:
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+				return data, nil
+			}), func() time.Time { return now }, time.Minute)
+			if _, e := cache.key(context.Background(), "one"); e != nil {
+				t.Fatal(e)
+			}
+			now = now.Add(time.Minute)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if during {
+				done := make(chan error, 1)
+				go func() { _, e := cache.key(ctx, "one"); done <- e }()
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("fetch not started")
+				}
+				cancel()
+				close(release)
+				select {
+				case e := <-done:
+					if !errors.Is(e, context.Canceled) {
+						t.Fatal("cancelled request received identity", e)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("fetch stuck")
+				}
+			} else {
+				cancel()
+				if _, e := cache.key(ctx, "one"); !errors.Is(e, context.Canceled) {
+					t.Fatal(e)
+				}
+				if calls.Load() != 1 {
+					t.Fatal("cancelled request spent refresh slot")
+				}
+			}
+			if _, e := cache.key(context.Background(), "one"); e != nil {
+				t.Fatal("live request failed after cancellation", e)
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("refresh count=%d", calls.Load())
+			}
+		})
+	}
+}
+
+func TestClockSkewDoesNotExtendExpiration(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	pub, key := testKey(t)
+	v := userVerifier(t, pub, &now)
+	for _, offset := range []time.Duration{time.Second, clockSkew, clockSkew + time.Second} {
+		c := baseClaims(now)
+		c.IssuedAt = jwt.NewNumericDate(now.Add(offset))
+		c.NotBefore = jwt.NewNumericDate(now.Add(offset))
+		_, e := v.VerifyUser(context.Background(), sign(t, key, jwt.SigningMethodEdDSA, "one", c))
+		if (e == nil) != (offset <= clockSkew) {
+			t.Fatalf("offset=%v error=%v", offset, e)
+		}
+	}
+	for _, expiration := range []time.Time{now, now.Add(-time.Second)} {
+		c := baseClaims(now)
+		c.ExpiresAt = jwt.NewNumericDate(expiration)
+		if _, e := v.VerifyUser(context.Background(), sign(t, key, jwt.SigningMethodEdDSA, "one", c)); e == nil {
+			t.Fatal("skew extended exp")
+		}
+	}
+}
+
+func TestRefreshWaiterCancellation(t *testing.T) {
+	now := time.Unix(1, 0)
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { t.Fatal("waiter started another fetch"); return nil, nil }), func() time.Time { return now }, time.Minute)
+	cache.gate <- struct{}{}
+	defer func() { <-cache.gate }()
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	arrived := make(chan struct{}, 1)
+	ctx := &arrivalContext{Context: parent, arrived: arrived}
+	done := make(chan error, 1)
+	go func() { done <- cache.refresh(ctx) }()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not enter gate")
+	}
+	cancel()
+	select {
+	case e := <-done:
+		if !errors.Is(e, context.Canceled) {
+			t.Fatal(e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter ignored cancellation")
+	}
+	if cache.hasAttempt {
+		t.Fatal("cancelled waiter consumed refresh slot")
 	}
 }

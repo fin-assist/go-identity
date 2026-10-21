@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	analyticsv1 "github.com/fin-assist/contracts/gen/go/finassist/analytics/v1"
 	"google.golang.org/grpc"
@@ -79,5 +81,65 @@ func TestRequestSchemaGuard(t *testing.T) {
 	}
 	if e = s.request(ctx, dynamicpb.NewMessage(descriptor.Messages().Get(0))); status.Code(e) != codes.PermissionDenied {
 		t.Fatal("invalid user_id schema admitted", e)
+	}
+}
+
+type messageStream interface{ Exchange(grpc.ServerStream) error }
+type messageStreamAPI struct{ processed atomic.Int32 }
+
+func (s *messageStreamAPI) Exchange(stream grpc.ServerStream) error {
+	for {
+		request := new(analyticsv1.GetAnalyticsRequest)
+		if e := stream.RecvMsg(request); e != nil {
+			if errors.Is(e, io.EOF) {
+				return nil
+			}
+			return e
+		}
+		s.processed.Add(1)
+		if e := stream.SendMsg(&analyticsv1.GetAnalyticsResponse{}); e != nil {
+			return e
+		}
+	}
+}
+
+func TestUserStreamRejectsSecondForeignMessage(t *testing.T) {
+	const method = "/test.Identity/Exchange"
+	auth, e := NewServer(AccessTable{method: {"bank-bff": User}}, goodService(), goodUser(), nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	descriptor := grpc.ServiceDesc{ServiceName: "test.Identity", HandlerType: (*messageStream)(nil), Streams: []grpc.StreamDesc{{StreamName: "Exchange", ServerStreams: true, ClientStreams: true, Handler: func(srv any, stream grpc.ServerStream) error { return srv.(messageStream).Exchange(stream) }}}}
+	api := new(messageStreamAPI)
+	server := grpc.NewServer(grpc.ChainStreamInterceptor(auth.Stream()))
+	server.RegisterService(&descriptor, api)
+	conn := dialServer(t, server, tokenFunc(func(context.Context) (string, error) { return "bank-bff", nil }))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ctx = context.WithValue(ctx, identityKey{}, principal{model: User, userID: "u", token: "access"})
+	stream, e := conn.NewStream(ctx, &descriptor.Streams[0], method)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = stream.SendMsg(&analyticsv1.GetAnalyticsRequest{UserId: proto.String("u")}); e != nil {
+		t.Fatal(e)
+	}
+	if e = stream.RecvMsg(&analyticsv1.GetAnalyticsResponse{}); e != nil {
+		t.Fatal("first message rejected", e)
+	}
+	if api.processed.Load() != 1 {
+		t.Fatal("first message not processed")
+	}
+	// The first response is the barrier: the same admitted stream now sends a
+	// different user. A first-message-only check would process it and send a reply.
+	if e = stream.SendMsg(&analyticsv1.GetAnalyticsRequest{UserId: proto.String("victim")}); e != nil {
+		t.Fatal(e)
+	}
+	e = stream.RecvMsg(&analyticsv1.GetAnalyticsResponse{})
+	if status.Code(e) != codes.PermissionDenied || len(status.Convert(e).Details()) != 0 {
+		t.Fatal("foreign second message admitted or details leaked", e)
+	}
+	if api.processed.Load() != 1 {
+		t.Fatal("foreign second message reached processing")
 	}
 }

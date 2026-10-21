@@ -13,12 +13,15 @@ import (
 
 const maxToken = 16 << 10
 
+const clockSkew = 5 * time.Second
+
 // Observer receives only bounded library-defined kind/reason values. It must be
 // safe for concurrent use. No token, user ID or untrusted caller is passed to it.
 type Observer interface{ Reject(kind, reason string) }
 
 // VerifyOptions pins issuer, audience and clock. All are required. Observer is
 // optional. JWT algorithm policy is fixed by the constructor, never by a token.
+// iat/nbf tolerate five seconds of clock skew; exp remains a strict boundary.
 type VerifyOptions struct {
 	Issuer, Audience string
 	Clock            func() time.Time
@@ -73,7 +76,11 @@ func (v verifier) parse(ctx context.Context, raw, kind string) (*claims, string,
 			return nil, errors.New("identity: wrong key algorithm")
 		}
 		return k.public, nil
-	}, jwt.WithValidMethods(v.algorithms), jwt.WithExpirationRequired(), jwt.WithIssuer(v.options.Issuer), jwt.WithAudience(v.options.Audience), jwt.WithTimeFunc(v.options.Clock), jwt.WithIssuedAt())
+	}, jwt.WithValidMethods(v.algorithms), jwt.WithExpirationRequired(), jwt.WithIssuer(v.options.Issuer), jwt.WithAudience(v.options.Audience), jwt.WithTimeFunc(v.options.Clock), jwt.WithIssuedAt(), jwt.WithLeeway(clockSkew))
+	// Apply skew only to iat/nbf, never extend the access/service expiration.
+	if err == nil && t.Valid && !v.options.Clock().Before(c.ExpiresAt.Time) {
+		err = jwt.ErrTokenExpired
+	}
 	if err == nil && t.Valid && strings.TrimSpace(c.Subject) != "" && len(c.Subject) <= 256 {
 		kid, _ := t.Header["kid"].(string)
 		return c, kid, nil

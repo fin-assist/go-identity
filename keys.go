@@ -52,6 +52,9 @@ func NewKeyCache(provider JWKSProvider, clock func() time.Time, interval time.Du
 }
 
 func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error) {
+	if err := ctx.Err(); err != nil {
+		return verificationKey{}, err
+	}
 	c.mu.RLock()
 	k, ok := c.keys[kid]
 	fresh := c.keys != nil && c.clock().Sub(c.updated) < c.interval
@@ -60,6 +63,9 @@ func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error)
 		return k, nil
 	}
 	if err := c.refresh(ctx); err != nil {
+		return verificationKey{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return verificationKey{}, err
 	}
 	c.mu.RLock()
@@ -72,18 +78,24 @@ func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error)
 }
 
 func (c *KeyCache) refresh(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case c.gate <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 	defer func() { <-c.gate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	now := c.clock()
 	if c.hasAttempt && now.Sub(c.attempted) < time.Minute {
 		return nil
 	}
 	c.attempted, c.hasAttempt = now, true
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	data, err := c.provider.JWKS(ctx)
 	if err != nil {
