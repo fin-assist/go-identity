@@ -17,6 +17,10 @@ import (
 
 const maxJWKS = 1 << 20
 
+// Check more often than the refresh rate limit so scheduler jitter cannot skip
+// a whole minute of retries at the limit boundary.
+const refreshCheckPeriod = 30 * time.Second
+
 // JWKSProvider fetches trusted keys. Implementations must honour cancellation and
 // must not use a URL or key supplied by a token. Errors are never sent to callers.
 type JWKSProvider interface {
@@ -111,12 +115,13 @@ func (c *KeyCache) refresh(ctx context.Context) error {
 	return nil
 }
 
-// Run proactively refreshes a snapshot at half its maximum age, checking once a
-// minute. Failed loads retry on the next minute while the old snapshot is still
-// valid. The service owns this job; cancellation waits at most five seconds for
-// an already started shared fetch. The return value is ctx.Err().
+// Run proactively refreshes a snapshot at half its maximum age, checking every
+// 30 seconds. Failed loads become eligible after one minute and retry on the next
+// eligible tick. The old snapshot is usable only within its maximum age. The
+// service owns this job; cancellation waits at most five seconds for an already
+// started shared fetch. The return value is ctx.Err().
 func (c *KeyCache) Run(ctx context.Context) error {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(refreshCheckPeriod)
 	defer ticker.Stop()
 	return c.run(ctx, ticker.C)
 }

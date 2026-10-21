@@ -769,3 +769,42 @@ func TestKeyCacheMinimumAgeAllowsProactiveRefresh(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestRefreshTickJitterRetriesWithinNinetySeconds(t *testing.T) {
+	origin := time.Unix(1700000000, 0)
+	now := origin
+	pub, _ := testKey(t)
+	data := jwks(t, map[string]ed25519.PublicKey{"one": pub})
+	calls := 0
+	fail := false
+	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) {
+		calls++
+		if fail {
+			return nil, errors.New("upstream temporarily down")
+		}
+		return data, nil
+	}), func() time.Time { return now }, 10*time.Minute)
+	cache.refreshIfDue(context.Background())
+	fail = true
+	// This tick was handled 1 ms late. The next nominal minute is still inside
+	// the limiter window; the intermediate poll must recover by 90 seconds.
+	now = origin.Add(5*time.Minute + time.Millisecond)
+	cache.refreshIfDue(context.Background())
+	if calls != 2 {
+		t.Fatal("failed attempt missing")
+	}
+	fail = false
+	for offset := refreshCheckPeriod; offset <= 90*time.Second; offset += refreshCheckPeriod {
+		now = origin.Add(5*time.Minute + offset)
+		cache.refreshIfDue(context.Background())
+		if offset <= time.Minute && calls != 2 {
+			t.Fatal("minute limit bypassed")
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("retry missed 90-second bound: %d fetches", calls)
+	}
+	if _, e := cache.key(context.Background(), "one"); e != nil {
+		t.Fatal("recovered snapshot unavailable", e)
+	}
+}
