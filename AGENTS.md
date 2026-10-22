@@ -33,7 +33,7 @@ for itself: what it does, its YouTrack issue, which services use it.
 | What | Where |
 |---|---|
 | Package documentation: what the library does, what it needs from the service | `doc.go` |
-| Public API of the library | root package (`*.go`); subpackages only for parts with different consumers |
+| Public API of the library | root package: `verify.go`, `keys.go`, `providers.go`, `tokens.go`, `context.go`, `grpc.go`, `http.go`, `metrics.go` |
 | Implementation details | `internal/` |
 | Integration guide for services | `README.md`, «Внедрение» |
 | Versions, compatibility, releases, Renovate | `docs/releasing.md`, `CHANGELOG.md`, `.github/workflows/release.yml`, `renovate.json` |
@@ -47,6 +47,14 @@ Versions are in `go.mod` (Go toolchain included), `.github/workflows/ci.yml` and
 gorelease), `internal/pgtest.DefaultImage` (PostgreSQL). The same pieces as the services where needed: pgx v5,
 golang-migrate, grpc-go, protobuf, prometheus client_golang, testcontainers-go, squawk. A new dependency is named in
 the PR with why it is needed: every service that imports the library inherits it.
+
+## Identity implementation
+
+- `KeyCache` takes a `JWKSProvider`; `UserKeys` uses the generated user client, `HTTPKeys` pins an HTTPS Kubernetes endpoint. Refresh is serialized, bounded and limited even on failure; the shared 5-second fetch survives cancellation of its triggering request. Run checks every 30 seconds and refreshes at half the maximum snapshot age (minimum age 2 minutes); the network rate limit stays one minute, normally giving retries in 60-90 seconds before scheduler/gate delays. HTTPKeys can use a separate rotating API-server-audience TokenSource.
+- User access tokens: Ed25519 / ES256, required exp/iss/aud/sub; iat/nbf allow 5 seconds of skew while exp stays strict; errors use `finerr.InvalidToken` (including expired access tokens). Kubernetes additionally binds namespace, serviceaccount name and sub. Stage keys bind kid=sub to one service, and both stage constructors reject prod/unknown environments.
+- `Server` copies an exact method/caller/model table. `UserID` is only a verified sub; `SystemUserID` accepts a request field only after System admission. Streams check identity on admission and user_id on each RecvMsg. Client interceptors forward only a package-verified access token.
+- Integration/usage tests use TLS httptest, actual files and generated gRPC clients on bufconn; this library has no database or migrations and requires no PostgreSQL.
+- Services migrating from the template must adapt its context accessors/tombstone chain; the library context is distinct. See README bootstrap and wiring.
 
 ## Build in an agent container
 
