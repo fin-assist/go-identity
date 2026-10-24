@@ -87,7 +87,7 @@ func (o *observer) Reject(kind, reason string) {
 	o.reasons = append(o.reasons, kind+":"+reason)
 }
 
-func TestUserTokens(t *testing.T) {
+func TestUnitUserTokens(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	pub, key := testKey(t)
 	_, foreign := testKey(t)
@@ -161,7 +161,7 @@ func TestUserTokens(t *testing.T) {
 	}
 }
 
-func TestAlgorithms(t *testing.T) {
+func TestUnitAlgorithms(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	ec, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if e != nil {
@@ -205,7 +205,7 @@ func TestAlgorithms(t *testing.T) {
 	}
 }
 
-func TestKeyCacheRotationAndFailure(t *testing.T) {
+func TestUnitKeyCacheRotationAndFailure(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	p, _ := testKey(t)
 	p2, _ := testKey(t)
@@ -269,7 +269,7 @@ func TestKeyCacheRotationAndFailure(t *testing.T) {
 	}
 }
 
-func TestKeyCacheConcurrentAndCancelled(t *testing.T) {
+func TestUnitKeyCacheConcurrentAndCancelled(t *testing.T) {
 	p, _ := testKey(t)
 	now := time.Unix(1700000000, 0)
 	var calls atomic.Int32
@@ -303,7 +303,7 @@ func TestKeyCacheConcurrentAndCancelled(t *testing.T) {
 	}
 }
 
-func TestParseJWKSInvalid(t *testing.T) {
+func TestUnitParseJWKSInvalid(t *testing.T) {
 	pub, _ := testKey(t)
 	good := string(jwks(t, map[string]ed25519.PublicKey{"k": pub}))
 	for _, s := range []string{"", `{}`, `{"keys":[]}`, strings.Repeat("x", maxJWKS+1), strings.Replace(good, `"Ed25519"`, `"other"`, 1), strings.Replace(good, `"EdDSA"`, `"HS256"`, 1), strings.Replace(good, `"kid":"k"`, `"kid":""`, 1), strings.Replace(good, `"kty":"OKP"`, `"use":"enc","kty":"OKP"`, 1), strings.Replace(good, `"kty":"OKP"`, `"key_ops":["sign"],"kty":"OKP"`, 1), `{"keys":[{"kid":"k","kty":"EC","crv":"P-256","x":"AA","y":"AA"}]}`, `{"keys":[{"kid":"k","kty":"RSA","n":"AA","e":"Aw"}]}`} {
@@ -320,7 +320,7 @@ func TestParseJWKSInvalid(t *testing.T) {
 	}
 }
 
-func TestKubernetesAndStageBinding(t *testing.T) {
+func TestUnitKubernetesAndStageBinding(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	pub, key := testKey(t)
 	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { return jwks(t, map[string]ed25519.PublicKey{"k": pub}), nil }), func() time.Time { return now }, time.Hour)
@@ -382,7 +382,7 @@ func TestKubernetesAndStageBinding(t *testing.T) {
 	}
 }
 
-func TestConstructors(t *testing.T) {
+func TestUnitConstructors(t *testing.T) {
 	now := time.Unix(1, 0)
 	pub, _ := testKey(t)
 	o := opts(&now)
@@ -419,7 +419,7 @@ func TestConstructors(t *testing.T) {
 	}
 }
 
-func TestAdditionalKeyValidation(t *testing.T) {
+func TestUnitAdditionalKeyValidation(t *testing.T) {
 	pub, _ := testKey(t)
 	valid := string(jwks(t, map[string]ed25519.PublicKey{"one": pub}))
 	if _, e := parseJWKS([]byte(strings.Replace(valid, `"kty":"OKP"`, `"key_ops":["verify"],"use":"sig","kty":"OKP"`, 1))); e != nil {
@@ -474,7 +474,7 @@ func (c *arrivalContext) Done() <-chan struct{} {
 	return c.Context.Done()
 }
 
-func TestUnknownKeyConcurrentFailedRefresh(t *testing.T) {
+func TestUnitUnknownKeyConcurrentFailedRefresh(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	var calls atomic.Int32
 	held := make(chan struct{})
@@ -548,7 +548,7 @@ func TestUnknownKeyConcurrentFailedRefresh(t *testing.T) {
 	}
 }
 
-func TestRefreshSurvivesRequestCancellation(t *testing.T) {
+func TestUnitRefreshSurvivesRequestCancellation(t *testing.T) {
 	for _, during := range []bool{false, true} {
 		t.Run(fmt.Sprint("during_fetch=", during), func(t *testing.T) {
 			now := time.Unix(1700000000, 0)
@@ -614,7 +614,7 @@ func TestRefreshSurvivesRequestCancellation(t *testing.T) {
 	}
 }
 
-func TestClockSkewDoesNotExtendExpiration(t *testing.T) {
+func TestUnitClockSkewDoesNotExtendExpiration(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	pub, key := testKey(t)
 	v := userVerifier(t, pub, &now)
@@ -636,7 +636,7 @@ func TestClockSkewDoesNotExtendExpiration(t *testing.T) {
 	}
 }
 
-func TestRefreshWaiterCancellation(t *testing.T) {
+func TestUnitRefreshWaiterCancellation(t *testing.T) {
 	now := time.Unix(1, 0)
 	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { t.Fatal("waiter started another fetch"); return nil, nil }), func() time.Time { return now }, 2*time.Minute)
 	cache.gate <- struct{}{}
@@ -666,7 +666,7 @@ func TestRefreshWaiterCancellation(t *testing.T) {
 	}
 }
 
-func TestProactiveRefreshRetriesWithinSnapshotLifetime(t *testing.T) {
+func TestUnitProactiveRefreshRetriesWithinSnapshotLifetime(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	pub, _ := testKey(t)
 	data := jwks(t, map[string]ed25519.PublicKey{"one": pub})
@@ -713,7 +713,7 @@ func TestProactiveRefreshRetriesWithinSnapshotLifetime(t *testing.T) {
 	}
 }
 
-func TestKeyCacheRunControlledTicks(t *testing.T) {
+func TestUnitKeyCacheRunControlledTicks(t *testing.T) {
 	var instant atomic.Int64
 	instant.Store(time.Unix(1700000000, 0).UnixNano())
 	clock := func() time.Time { return time.Unix(0, instant.Load()) }
@@ -760,7 +760,7 @@ func TestKeyCacheRunControlledTicks(t *testing.T) {
 	}
 }
 
-func TestKeyCacheMinimumAgeAllowsProactiveRefresh(t *testing.T) {
+func TestUnitKeyCacheMinimumAgeAllowsProactiveRefresh(t *testing.T) {
 	provider := providerFunc(func(context.Context) ([]byte, error) { return nil, nil })
 	if _, e := NewKeyCache(provider, time.Now, time.Minute); e == nil {
 		t.Fatal("snapshot age leaves no room before refresh limit")
@@ -770,7 +770,7 @@ func TestKeyCacheMinimumAgeAllowsProactiveRefresh(t *testing.T) {
 	}
 }
 
-func TestRefreshTickJitterRetriesWithinNinetySeconds(t *testing.T) {
+func TestUnitRefreshTickJitterRetriesWithinNinetySeconds(t *testing.T) {
 	origin := time.Unix(1700000000, 0)
 	now := origin
 	pub, _ := testKey(t)
