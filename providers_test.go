@@ -19,7 +19,7 @@ type keysClient func(context.Context, *userv1.GetSigningKeysRequest, ...grpc.Cal
 func (f keysClient) GetSigningKeys(c context.Context, r *userv1.GetSigningKeysRequest, o ...grpc.CallOption) (*userv1.GetSigningKeysResponse, error) {
 	return f(c, r, o...)
 }
-func TestUserKeys(t *testing.T) {
+func TestUnitUserKeys(t *testing.T) {
 	if _, e := (UserKeys{}).JWKS(context.Background()); e == nil {
 		t.Fatal("nil client")
 	}
@@ -44,7 +44,7 @@ func TestUserKeys(t *testing.T) {
 		}
 	}
 }
-func TestHTTPKeysTLS(t *testing.T) {
+func TestIntegrationHTTPKeysTLS(t *testing.T) {
 	status := http.StatusOK
 	body := "keys"
 	redirected := false
@@ -95,7 +95,7 @@ func TestHTTPKeysTLS(t *testing.T) {
 	}
 }
 
-func TestHTTPKeysAuthenticatedAndRotating(t *testing.T) {
+func TestIntegrationHTTPKeysAuthenticatedAndRotating(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "api-token")
 	if e := os.WriteFile(path, []byte("api-one"), 0600); e != nil {
 		t.Fatal(e)

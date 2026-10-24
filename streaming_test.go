@@ -34,7 +34,7 @@ func (s *testStream) RecvMsg(m any) error {
 	r.UserId = proto.String(s.field)
 	return nil
 }
-func TestStreamChecksEveryMessage(t *testing.T) {
+func TestUnitStreamChecksEveryMessage(t *testing.T) {
 	s := serverForTest(t)
 	for _, field := range []string{"", "u", "victim"} {
 		stream := &testStream{ctx: incoming("bank-bff", "access"), field: field}
@@ -66,7 +66,7 @@ func TestStreamChecksEveryMessage(t *testing.T) {
 	}
 }
 
-func TestRequestSchemaGuard(t *testing.T) {
+func TestUnitRequestSchemaGuard(t *testing.T) {
 	s := serverForTest(t)
 	ctx, e := s.admit(incoming("bank-bff", "access"), "/test.Service/Method")
 	if e != nil {
@@ -103,7 +103,7 @@ func (s *messageStreamAPI) Exchange(stream grpc.ServerStream) error {
 	}
 }
 
-func TestUserStreamRejectsSecondForeignMessage(t *testing.T) {
+func TestIntegrationUserStreamRejectsSecondForeignMessage(t *testing.T) {
 	const method = "/test.Identity/Exchange"
 	auth, e := NewServer(AccessTable{method: {"bank-bff": User}}, goodService(), goodUser(), nil)
 	if e != nil {
