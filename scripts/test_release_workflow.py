@@ -12,6 +12,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Invoke the fixture interpreter directly: executing temporary shebang files can
+# stall on hosts that inspect newly created executables. The workflow shell stays intact.
+FAKE_GH_COMMAND = 'gh() { "$FAKE_PYTHON" "$FAKE_GH_SCRIPT" "$@"; }\n'
+
 
 def workflow_script(name):
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
@@ -65,12 +69,11 @@ class ReleasePublicationTests(unittest.TestCase):
             (root / 'state.json').write_text(json.dumps(initial))
             (root / 'notes.md').write_text('Notes from the tagged CHANGELOG\n')
             gh = root / 'gh'
-            gh.write_text('#!' + sys.executable + '\n' + FAKE_GH)
-            gh.chmod(0o755)
+            gh.write_text(FAKE_GH)
             env = dict(os.environ, TAG='v0.1.1', FAKE_GITHUB=directory,
-                       PATH=directory + os.pathsep + os.environ['PATH'])
+                       FAKE_PYTHON=sys.executable, FAKE_GH_SCRIPT=str(gh))
             results = [subprocess.run(
-                ['/bin/bash', '-e', '-o', 'pipefail', '-c', workflow_script('GitHub release')],
+                ['/bin/bash', '-e', '-o', 'pipefail', '-c', FAKE_GH_COMMAND + workflow_script('GitHub release')],
                 cwd=root, env=env, capture_output=True, text=True, timeout=10)
                 for _ in range(attempts)]
             calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
@@ -145,11 +148,10 @@ class ReleaseValidationTests(unittest.TestCase):
             git('checkout', '--detach', tag)
             (root / 'state.json').write_text(json.dumps({'exists': True, 'notes': 'Owner notes'}))
             gh = root / 'gh'
-            gh.write_text('#!' + sys.executable + '\n' + FAKE_GH)
-            gh.chmod(0o755)
+            gh.write_text(FAKE_GH)
             env = dict(os.environ, TAG=tag, GITHUB_SHA=main_sha, FAKE_GITHUB=directory,
-                       PATH=directory + os.pathsep + os.environ['PATH'])
-            script = (workflow_script('The tag is a release of this module') + '\n'
+                       FAKE_PYTHON=sys.executable, FAKE_GH_SCRIPT=str(gh))
+            script = (FAKE_GH_COMMAND + workflow_script('The tag is a release of this module') + '\n'
                       + workflow_script('GitHub release'))
             result = subprocess.run(['/bin/bash', '-e', '-o', 'pipefail', '-c', script],
                                     cwd=root, env=env, capture_output=True, text=True, timeout=15)
