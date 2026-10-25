@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/fin-assist/contracts/gen/go v0.4.0
-	github.com/fin-assist/go-grpc v0.1.0
+	github.com/fin-assist/go-grpc v0.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/prometheus/client_golang v1.25.0
 	google.golang.org/grpc v1.84.0
