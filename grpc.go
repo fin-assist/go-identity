@@ -18,12 +18,16 @@ import (
 // wildcards or implicit exceptions: even GetSigningKeys needs its own entry.
 type AccessTable map[string]map[string]Model
 
-// ServiceChecker verifies service tokens. Its errors remain internal.
+// ServiceChecker verifies service tokens. Its errors remain internal: Server
+// answers a bare UNAUTHENTICATED, except for a bare UNAVAILABLE, CANCELED or
+// DEADLINE_EXCEEDED status (the token was not judged), which it passes on bare.
 type ServiceChecker interface {
 	VerifyService(context.Context, string) (string, error)
 }
 
-// UserChecker verifies access tokens. Its errors are normalized to INVALID_TOKEN.
+// UserChecker verifies access tokens. Its errors are normalized to INVALID_TOKEN,
+// except for a bare UNAVAILABLE, CANCELED or DEADLINE_EXCEEDED status, which is
+// passed on bare: a key outage must not look like a rejected session.
 type UserChecker interface {
 	VerifyUser(context.Context, string) (string, error)
 }
@@ -67,7 +71,13 @@ func (s *Server) admit(ctx context.Context, method string) (context.Context, err
 		return nil, internalStatus(codes.Unauthenticated)
 	}
 	caller, err := s.services.VerifyService(ctx, token)
-	if err != nil || !serviceName(caller) {
+	if err != nil {
+		if unjudged := notJudged(err); unjudged != nil {
+			return nil, unjudged
+		}
+		return nil, internalStatus(codes.Unauthenticated)
+	}
+	if !serviceName(caller) {
 		return nil, internalStatus(codes.Unauthenticated)
 	}
 	model, ok := s.table[method][caller]
@@ -83,7 +93,13 @@ func (s *Server) admit(ctx context.Context, method string) (context.Context, err
 			return nil, finerr.InvalidToken()
 		}
 		p.userID, err = s.users.VerifyUser(ctx, p.token)
-		if err != nil || strings.TrimSpace(p.userID) == "" {
+		if err != nil {
+			if unjudged := notJudged(err); unjudged != nil {
+				return nil, unjudged
+			}
+			return nil, finerr.InvalidToken()
+		}
+		if strings.TrimSpace(p.userID) == "" {
 			return nil, finerr.InvalidToken()
 		}
 	}
@@ -100,6 +116,17 @@ func (s *Server) reject(reason string) {
 // failures carry neither ErrorInfo nor caller/token details (grpc-api.md 5.1).
 func internalStatus(code codes.Code) error {
 	return status.Error(code, "") //nolint:forbidigo // Internal refusal, not a client-facing registry error.
+}
+
+// notJudged recognizes a checker error saying the token was not judged (keys
+// unavailable, request context ended) and rebuilds it as a bare status, so no
+// detail of a custom checker leaks. It returns nil for a verdict on the token.
+func notJudged(err error) error {
+	switch code := status.Code(err); code {
+	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded:
+		return internalStatus(code)
+	}
+	return nil
 }
 
 func (s *Server) request(ctx context.Context, req any) error {

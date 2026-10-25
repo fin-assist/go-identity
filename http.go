@@ -17,7 +17,10 @@ type HTTP struct {
 }
 
 // NewHTTP requires a verifier and the service's contract-aware error writer.
-// The writer receives only finerr.InvalidToken(), for a 401 INVALID_TOKEN response.
+// The writer receives finerr.InvalidToken() for a rejected token (401
+// INVALID_TOKEN), or a bare UNAVAILABLE, CANCELED or DEADLINE_EXCEEDED status
+// when the token could not be judged; finerr.ToREST does not map those, so the
+// writer answers 500 INTERNAL_ERROR and the client keeps its session.
 func NewHTTP(users UserChecker, respond func(http.ResponseWriter, *http.Request, error)) (*HTTP, error) {
 	if users == nil || respond == nil {
 		return nil, errors.New("identity: HTTP verifier and responder required")
@@ -35,7 +38,15 @@ func (m *HTTP) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		id, err := m.users.VerifyUser(r.Context(), token)
-		if err != nil || strings.TrimSpace(id) == "" {
+		if err != nil {
+			if unjudged := notJudged(err); unjudged != nil {
+				m.respond(w, r, unjudged)
+				return
+			}
+			m.respond(w, r, finerr.InvalidToken())
+			return
+		}
+		if strings.TrimSpace(id) == "" {
 			m.respond(w, r, finerr.InvalidToken())
 			return
 		}
