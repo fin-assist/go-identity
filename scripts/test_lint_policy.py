@@ -45,16 +45,18 @@ def module_version(module):
 
 # The probe is hermetic: every module it compiles is pinned, so an upstream release cannot break CI.
 # The rule is chosen per module by the library's go.mod:
-# - a module required in go.mod takes its version from there and must match it exactly after tidy
+# - a FROM_GO_MOD module must be in go.mod and keep exactly its go.mod version after tidy
 #   (Renovate updates go.mod, so the probe follows it);
-# - a module absent from go.mod takes its HAND_PINNED version as a minimum: tidy may raise it when a go.mod
-#   dependency (grpc -> otel) needs a newer release, never lower it.
+# - a HAND_PINNED module that is also in go.mod expects max(go.mod, HAND_PINNED) exactly: a go.mod version
+#   below the hand minimum would be raised by its sibling pins (otel/log -> otel) anyway;
+# - a HAND_PINNED module absent from go.mod takes its HAND_PINNED version as a minimum: tidy may raise it when a
+#   go.mod dependency (grpc -> otel) needs a newer release, never lower it.
 # Renovate does not read HAND_PINNED: raise it by hand in a reviewed PR, when the libraries or services move to a
 # new otel/klog/automaxprocs/automemlimit release, or when the probe needs an API that only a newer release has.
 GO_VERSION = re.search(r"^go (\S+)$", GO_MOD, re.M)[1]
 # Must be in go.mod: the probe checks the versions the library actually builds with.
 FROM_GO_MOD = ["github.com/prometheus/client_golang", "google.golang.org/grpc", "golang.org/x/sys"]
-# Minimums used while a module is absent from go.mod (the template's releases).
+# Minimum versions (the template's releases): exact expectation max(go.mod, minimum) when in go.mod.
 HAND_PINNED = {
     "go.opentelemetry.io/otel": "v1.44.0",
     "go.opentelemetry.io/otel/log": "v0.20.0",  # the release paired with otel v1.44.0
@@ -66,14 +68,6 @@ HAND_PINNED = {
     "github.com/KimMachineGun/automemlimit": "v1.0.1",
 }
 
-
-def pinned_version(module, go_mod=GO_MOD):
-    """The probe's version of module: from go.mod when it is there, else the HAND_PINNED minimum."""
-    return go_mod_version(go_mod, module) or HAND_PINNED[module]
-
-
-PINNED = {**{module: module_version(module) for module in FROM_GO_MOD},
-          **{module: pinned_version(module) for module in HAND_PINNED}}
 
 SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
 
@@ -91,11 +85,31 @@ def semver_key(version):
     return release, (0, identifiers)
 
 
+def pinned_version(module, go_mod=GO_MOD):
+    """The probe's expected version of module.
+
+    From go.mod, raised to the HAND_PINNED minimum when both exist; the minimum alone when go.mod lacks it.
+    """
+    from_go_mod = go_mod_version(go_mod, module)
+    minimum = HAND_PINNED.get(module)
+    if from_go_mod is None:
+        if minimum is None:
+            raise KeyError(module)
+        return minimum
+    if minimum is not None and semver_key(minimum) > semver_key(from_go_mod):
+        return minimum
+    return from_go_mod
+
+
 def pin_holds(module, pinned, resolved, go_mod=GO_MOD):
-    """A module in go.mod must keep its version exactly; one absent from it may only be raised."""
+    """A module in go.mod must resolve exactly to its expected version; one absent from it may only be raised."""
     if go_mod_version(go_mod, module) is not None:
         return resolved == pinned
     return semver_key(resolved) >= semver_key(pinned)
+
+
+PINNED = {**{module: module_version(module) for module in FROM_GO_MOD},
+          **{module: pinned_version(module) for module in HAND_PINNED}}
 
 
 PROMETHEUS = "github.com/prometheus/client_golang/prometheus"
@@ -340,6 +354,21 @@ class PinTests(unittest.TestCase):
         self.assertEqual(pinned_version("google.golang.org/grpc", self.WITHOUT), "v1.84.0")
         with self.assertRaises(KeyError):
             pinned_version("google.golang.org/protobuf", self.WITHOUT)
+
+    def test_go_mod_below_hand_minimum_expects_the_minimum(self):
+        module = "go.opentelemetry.io/otel"
+        minimum = HAND_PINNED[module]
+        (major, minor, patch), _ = semver_key(minimum)
+        lower = f"v{major}.{minor - 1}.{patch}"
+        go_mod = f"module example.com/lib\n\nrequire (\n\tgoogle.golang.org/grpc v1.84.0\n\t{module} {lower}\n)\n"
+        expected = pinned_version(module, go_mod)
+        self.assertEqual(expected, minimum)
+        self.assertTrue(pin_holds(module, expected, minimum, go_mod))
+        self.assertFalse(pin_holds(module, expected, lower, go_mod))
+        self.assertFalse(pin_holds(module, expected, f"v{major}.{minor + 1}.0", go_mod))
+        # A go.mod version above the minimum wins.
+        higher = f"v{major}.{minor + 1}.0"
+        self.assertEqual(pinned_version(module, go_mod.replace(lower, higher)), higher)
 
     def test_absent_module_accepts_only_raised_versions(self):
         module = "go.opentelemetry.io/otel"
