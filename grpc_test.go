@@ -74,7 +74,7 @@ func incoming(service, user string) context.Context {
 	}
 	return metadata.NewIncomingContext(context.Background(), md)
 }
-func TestServerAdmission(t *testing.T) {
+func TestUnitServerAdmission(t *testing.T) {
 	s := serverForTest(t)
 	for _, tc := range []struct {
 		name, service, user, method, field string
@@ -145,7 +145,7 @@ func TestServerAdmission(t *testing.T) {
 	}
 }
 
-func TestClientsAndMasking(t *testing.T) {
+func TestUnitClientsAndMasking(t *testing.T) {
 	src := tokenFunc(func(context.Context) (string, error) { return "svc", nil })
 	ctx := context.WithValue(context.Background(), identityKey{}, principal{model: User, userID: "u", token: "exact.token"})
 	md := metadata.Pairs("authorization", "Bearer forged", "x-service-authorization", "forged", "x-request-id", "r")
@@ -207,18 +207,17 @@ func TestClientsAndMasking(t *testing.T) {
 type analyticsAPI struct {
 	analyticsv1.UnimplementedAnalyticsServiceServer
 	calls atomic.Int32
-	t     *testing.T
 }
 
 func (a *analyticsAPI) GetAnalytics(ctx context.Context, r *analyticsv1.GetAnalyticsRequest) (*analyticsv1.GetAnalyticsResponse, error) {
 	a.calls.Add(1)
 	c, ok := Caller(ctx)
 	if !ok {
-		a.t.Fatal("missing caller")
+		return nil, errors.New("missing caller")
 	}
 	if c == "bank-bff" {
 		if id, ok := UserID(ctx); !ok || id != "user-1" {
-			a.t.Fatal("missing user")
+			return nil, errors.New("missing user")
 		}
 	} else {
 		if _, e := SystemUserID(ctx, r.GetUserId()); e != nil {
@@ -274,7 +273,7 @@ func dialServer(t *testing.T, s *grpc.Server, source TokenSource) *grpc.ClientCo
 
 // TestUsageHTTPToGRPC exercises README wiring with real signatures, a generated
 // client and a bufconn server; no fake verifier admits the call.
-func TestUsageHTTPToGRPC(t *testing.T) {
+func TestIntegrationUsageHTTPToGRPC(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	userPub, userKey := testKey(t)
 	svcPub, svcKey := testKey(t)
@@ -293,7 +292,7 @@ func TestUsageHTTPToGRPC(t *testing.T) {
 		t.Fatal(e)
 	}
 	server := grpc.NewServer(grpc.ChainUnaryInterceptor(access.Unary()), grpc.ChainStreamInterceptor(access.Stream()))
-	api := &analyticsAPI{t: t}
+	api := new(analyticsAPI)
 	analyticsv1.RegisterAnalyticsServiceServer(server, api)
 	userv1.RegisterUserInternalServiceServer(server, &keysAPI{body: string(jwks(t, map[string]ed25519.PublicKey{"one": userPub}))})
 	grpc_health_v1.RegisterHealthServer(server, healthAPI{})
@@ -367,7 +366,7 @@ func TestUsageHTTPToGRPC(t *testing.T) {
 	}
 }
 
-func TestMetrics(t *testing.T) {
+func TestUnitMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m, e := NewMetrics(reg)
 	if e != nil {
@@ -394,7 +393,7 @@ func TestMetrics(t *testing.T) {
 	}
 }
 
-func TestUsageKubernetesSystemCall(t *testing.T) {
+func TestIntegrationUsageKubernetesSystemCall(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	pub, key := testKey(t)
 	cache, _ := NewKeyCache(providerFunc(func(context.Context) ([]byte, error) { return jwks(t, map[string]ed25519.PublicKey{"k": pub}), nil }), func() time.Time { return now }, time.Hour)
@@ -407,7 +406,7 @@ func TestUsageKubernetesSystemCall(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	api := &analyticsAPI{t: t}
+	api := new(analyticsAPI)
 	server := grpc.NewServer(grpc.ChainUnaryInterceptor(access.Unary()))
 	analyticsv1.RegisterAnalyticsServiceServer(server, api)
 	c := claims{RegisteredClaims: baseClaims(now)}
@@ -446,7 +445,7 @@ func TestUsageKubernetesSystemCall(t *testing.T) {
 	}
 }
 
-func TestUsageDeniedUserAndCaller(t *testing.T) {
+func TestIntegrationUsageDeniedUserAndCaller(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	userPub, userKey := testKey(t)
 	bffPub, bffKey := testKey(t)
@@ -462,7 +461,7 @@ func TestUsageDeniedUserAndCaller(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	api := &analyticsAPI{t: t}
+	api := new(analyticsAPI)
 	server := grpc.NewServer(grpc.ChainUnaryInterceptor(auth.Unary()))
 	analyticsv1.RegisterAnalyticsServiceServer(server, api)
 	c := baseClaims(now)

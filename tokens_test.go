@@ -25,7 +25,7 @@ func writeKey(t *testing.T, key ed25519.PrivateKey) string {
 	}
 	return path
 }
-func TestStageSource(t *testing.T) {
+func TestUnitStageSource(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	pub, key := testKey(t)
 	o := StageOptions{KeyFile: writeKey(t, key), Caller: "bank-bff", Issuer: "stage", Clock: func() time.Time { return now }}
@@ -86,7 +86,7 @@ func TestStageSource(t *testing.T) {
 	}
 }
 
-func TestProjectedRotation(t *testing.T) {
+func TestUnitProjectedRotation(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "v1")
 	path := filepath.Join(dir, "token")
@@ -155,7 +155,7 @@ func TestProjectedRotation(t *testing.T) {
 	}
 }
 
-func TestStageSourceShortFractionalTTL(t *testing.T) {
+func TestUnitStageSourceShortFractionalTTL(t *testing.T) {
 	now := time.Unix(1700000000, 900000000)
 	pub, key := testKey(t)
 	clock := func() time.Time { return now }
