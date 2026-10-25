@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -255,7 +256,8 @@ func (o AssemblyOptions) validate() error {
 		return errors.New("identity: stage keys are not allowed in prod")
 	}
 	k := o.Kubernetes.withDefaults()
-	if k.TokenFile == "" || k.TokenFile == k.APITokenFile {
+	// Compare canonical paths: "…/serviceaccount//token" is the API token too.
+	if k.TokenFile == "" || filepath.Clean(k.TokenFile) == filepath.Clean(k.APITokenFile) {
 		return errors.New("identity: separate service and API token files are required")
 	}
 	if strings.TrimSpace(k.Issuer) == "" || !serviceName(k.Namespace) {

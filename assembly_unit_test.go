@@ -22,6 +22,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -99,8 +100,14 @@ func TestUnitAssemblyRejectsInvalidOptions(t *testing.T) {
 		"no service token":    func(o *AssemblyOptions) { o.Kubernetes.TokenFile = "" },
 		"shared token file":   func(o *AssemblyOptions) { o.Kubernetes.TokenFile = defaultKubernetesAPITokenFile },
 		"shared custom token": func(o *AssemblyOptions) { o.Kubernetes.APITokenFile = o.Kubernetes.TokenFile },
-		"bad namespace":       func(o *AssemblyOptions) { o.Kubernetes.Namespace = "Finassist" },
-		"blank issuer":        func(o *AssemblyOptions) { o.Kubernetes.Issuer = " " },
+		"shared token via dot": func(o *AssemblyOptions) {
+			o.Kubernetes.TokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/./token"
+		},
+		"shared token via double slash": func(o *AssemblyOptions) {
+			o.Kubernetes.TokenFile = "/var/run/secrets/kubernetes.io/serviceaccount//token"
+		},
+		"bad namespace": func(o *AssemblyOptions) { o.Kubernetes.Namespace = "Finassist" },
+		"blank issuer":  func(o *AssemblyOptions) { o.Kubernetes.Issuer = " " },
 		"stage issuer in prod": func(o *AssemblyOptions) {
 			o.Stage.Issuer = "stage"
 		},
@@ -131,7 +138,7 @@ func TestUnitAssemblyRejectsInvalidOptions(t *testing.T) {
 			if err == nil || a != nil {
 				t.Fatal("invalid options accepted")
 			}
-			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), t.TempDir()[:5]+"/") {
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "/") {
 				t.Fatal("error leaks configuration", err)
 			}
 			if !metricsFree(reg) {
@@ -165,6 +172,10 @@ func TestUnitAssemblyProdBuildsWithoutNetwork(t *testing.T) {
 	}
 	if _, ok := a.services.(*KubernetesVerifier); !ok {
 		t.Fatal("prod must verify Kubernetes ServiceAccount tokens")
+	}
+	// Only CAFile is trusted and no proxy from the environment sees the API token.
+	if a.transport.Proxy != nil || a.transport.TLSClientConfig.InsecureSkipVerify || a.transport.TLSClientConfig.RootCAs == nil {
+		t.Fatal("JWKS transport must trust only the configured CA, without a proxy")
 	}
 	if _, ok := a.tokens.(*ProjectedSource); !ok {
 		t.Fatal("prod must send the projected token")
@@ -202,23 +213,47 @@ func TestUnitAssemblyDialUser(t *testing.T) {
 	if a.Close() != nil {
 		t.Fatal("close failed")
 	}
-	for name, dial := range map[string]func(TokenSource) (*grpc.ClientConn, error){
-		"error":    func(TokenSource) (*grpc.ClientConn, error) { return nil, errors.New("dial secret-target") },
-		"nil conn": func(TokenSource) (*grpc.ClientConn, error) { return nil, nil },
-		"conn and error": func(TokenSource) (*grpc.ClientConn, error) {
-			c, _ := grpc.NewClient("passthrough:///user", grpc.WithTransportCredentials(insecure.NewCredentials()))
-			return c, errors.New("partial")
-		},
-	} {
+	newConn := func(t *testing.T) *grpc.ClientConn {
+		c, err := grpc.NewClient("passthrough:///user", grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	cases := map[string]struct {
+		dial     func(*testing.T, **grpc.ClientConn) func(TokenSource) (*grpc.ClientConn, error)
+		occupied bool // metrics already registered: the failure comes after a successful dial
+	}{
+		"error": {dial: func(*testing.T, **grpc.ClientConn) func(TokenSource) (*grpc.ClientConn, error) {
+			return func(TokenSource) (*grpc.ClientConn, error) { return nil, errors.New("dial secret-target") }
+		}},
+		"nil conn": {dial: func(*testing.T, **grpc.ClientConn) func(TokenSource) (*grpc.ClientConn, error) {
+			return func(TokenSource) (*grpc.ClientConn, error) { return nil, nil }
+		}},
+		"conn and error": {dial: func(t *testing.T, got **grpc.ClientConn) func(TokenSource) (*grpc.ClientConn, error) {
+			return func(TokenSource) (*grpc.ClientConn, error) { *got = newConn(t); return *got, errors.New("partial") }
+		}},
+		"metrics conflict after dial": {occupied: true, dial: func(t *testing.T, got **grpc.ClientConn) func(TokenSource) (*grpc.ClientConn, error) {
+			return func(TokenSource) (*grpc.ClientConn, error) { *got = newConn(t); return *got, nil }
+		}},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			reg := prometheus.NewRegistry()
+			if tc.occupied && !metricsFree(reg) {
+				t.Fatal("registry not prepared")
+			}
+			var conn *grpc.ClientConn
 			o := prodOptions(t, reg)
-			o.UserKeys, o.DialUser = nil, dial
+			o.UserKeys, o.DialUser = nil, tc.dial(t, &conn)
 			if _, err := NewAssembly(o); err == nil || strings.Contains(err.Error(), "secret") {
 				t.Fatal("dial failure accepted or leaked", err)
 			}
-			if !metricsFree(reg) {
+			if !tc.occupied && !metricsFree(reg) {
 				t.Fatal("refused assembly left metrics registered")
+			}
+			if conn != nil && conn.GetState() != connectivity.Shutdown {
+				t.Fatal("refused assembly left the user connection open", conn.GetState())
 			}
 		})
 	}

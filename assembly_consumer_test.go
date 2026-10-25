@@ -2,17 +2,24 @@ package identity_test
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -585,5 +592,91 @@ func TestAPIAssemblyRefusesOtherEnvironments(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("stage key accepted in prod")
+	}
+}
+
+func TestIntegrationAssemblyRejectsJWKSFromAnotherCA(t *testing.T) {
+	clk := newClock()
+	k8s := newCluster(t)
+	userPub, _ := testKey(t)
+	options := k8s.options(t, file(t, []byte(kubeToken(t, k8s.key, "finassist", "analytics", clk.Now()))))
+	// Every httptest server shares one certificate, so the foreign CA is generated here.
+	options.CAFile = writeTemp(t, "other-ca.crt", foreignCA(t))
+	a, err := identity.NewAssembly(identity.AssemblyOptions{
+		Env: "prod", Service: "analytics", UserIssuer: "user", UserAudience: "finassist",
+		UserKeys:   &signingKeys{body: jwks(t, map[string]ed25519.PublicKey{"one": userPub})},
+		Kubernetes: options, Clock: clk.Now, Registerer: prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+	caller, err := a.VerifyService(t.Context(), kubeToken(t, k8s.key, "finassist", "bank-bff", clk.Now()))
+	if err == nil || caller != "" {
+		t.Fatal("JWKS from an untrusted certificate admitted a caller", caller)
+	}
+	// The handshake fails before any HTTP request, so the API token never leaves the pod.
+	if k8s.requests.Load() != 0 {
+		t.Fatal("request sent to a server outside the configured CA")
+	}
+}
+
+// foreignCA is a self-signed CA that signed none of the test servers.
+func foreignCA(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "foreign CA"}, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<32, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// proxyChildEnv marks the child process of TestIntegrationAssemblyIgnoresProxyEnvironment.
+const proxyChildEnv = "GO_IDENTITY_PROXY_CHILD"
+
+// The proxy environment must be set before the process starts: net/http reads it
+// once per process, so the check runs in a child copy of the test binary.
+func TestIntegrationAssemblyIgnoresProxyEnvironment(t *testing.T) {
+	if os.Getenv(proxyChildEnv) == "1" {
+		clk := newClock()
+		k8s := newCluster(t)
+		userPub, _ := testKey(t)
+		options := k8s.options(t, file(t, []byte(kubeToken(t, k8s.key, "finassist", "analytics", clk.Now()))))
+		// Not a loopback host: net/http never proxies loopback, so it would hide a regression.
+		options.JWKSURL = "https://kubernetes.finassist.invalid/openid/v1/jwks"
+		a, err := identity.NewAssembly(identity.AssemblyOptions{
+			Env: "prod", Service: "analytics", UserIssuer: "user", UserAudience: "finassist",
+			UserKeys:   &signingKeys{body: jwks(t, map[string]ed25519.PublicKey{"one": userPub})},
+			Kubernetes: options, Clock: clk.Now, Registerer: prometheus.NewRegistry(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = a.Close() }()
+		if caller, err := a.VerifyService(t.Context(), kubeToken(t, k8s.key, "finassist", "bank-bff", clk.Now())); err == nil || caller != "" {
+			t.Fatal("unreachable JWKS admitted a caller", caller)
+		}
+		return
+	}
+	var proxied atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxied.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestIntegrationAssemblyIgnoresProxyEnvironment$", "-test.count=1")
+	cmd.Env = append(os.Environ(), proxyChildEnv+"=1", "HTTPS_PROXY="+proxy.URL, "https_proxy="+proxy.URL, "HTTP_PROXY="+proxy.URL, "http_proxy="+proxy.URL, "NO_PROXY=", "no_proxy=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("child failed: %v\n%s", err, out)
+	}
+	if proxied.Load() != 0 {
+		t.Fatal("the JWKS request went through the proxy from the environment")
 	}
 }

@@ -72,7 +72,7 @@ jobs := []worker.Job{{Name: "identity-keys", Run: id.Run}}
 // Исходящие соединения: client.Options{Tokens: id}. При остановке, после завершения Run: id.Close().
 ```
 
-- `*Assembly` реализует `VerifyService`, `VerifyUser` и `Token` — интерфейсы `server.ServiceVerifier`, `server.UserVerifier`, `client.TokenSource` из go-grpc, а также `ServiceChecker`/`UserChecker` этой библиотеки (`NewServer`, `NewHTTP` в bank-bff). Вторую цепочку аутентификации не ставьте.
+- `*Assembly` реализует `VerifyService`, `VerifyUser` и `Token` — интерфейсы `server.ServiceVerifier`, `server.UserVerifier`, `client.TokenSource` из go-grpc, а также `UserChecker` для `NewHTTP` в bank-bff. Таблицу вызывающих со сборкой проверяет цепочка go-grpc (`server.Policy`), и отказы доступа считает она же; `identity.NewServer` со сборкой не используйте: её `Metrics` внутренний, и метрика `finassist_identity_rejected_total{kind="access"}` из шага 6 не заполнится. Вторую цепочку аутентификации не ставьте.
 - `DialUser` вызывается один раз в конструкторе с исходящим источником токенов сборки; соединение принадлежит сборке и закрывается в `Close`. Повторы — только `GetSigningKeys`. Сам `user` вместо `DialUser` передаёт `UserKeys` — локальный `JWKSProvider` своих публичных ключей, без вызова собственного RPC. Задаётся ровно одно из двух.
 - Конструктор ключей не загружает и горутин не запускает. `Run(ctx)` — задание сервиса: обновляет кэш ключей пользователя и, в prod, Kubernetes по правилам шага 3 и возвращает `ctx.Err()` после остановки всех циклов. До запуска `Run` ключи загружаются лениво на первом запросе.
 - Часы и реестр обязательны; логгер не нужен — библиотека ничего не журналирует, сбои ключей видны по `finassist_identity_rejected_total{reason="key_unavailable"}`.
