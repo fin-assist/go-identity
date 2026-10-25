@@ -1,1 +1,19 @@
-{}
+{
+  "21:2d2fd17d6629b56cac57c9861f8cb03956b293fc": {
+    "state": {
+      "sha": "2d2fd17d6629b56cac57c9861f8cb03956b293fc",
+      "runs": {
+        "ci.yml": {
+          "run_id": 40245255842,
+          "attempt": 1,
+          "retried": true
+        },
+        "renovate-policy-tests.yml": {
+          "run_id": 40245255867,
+          "attempt": 1,
+          "retried": false
+        }
+      }
+    }
+  }
+}
