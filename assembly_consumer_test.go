@@ -21,6 +21,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -671,10 +673,16 @@ func TestIntegrationAssemblyIgnoresProxyEnvironment(t *testing.T) {
 	defer proxy.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestIntegrationAssemblyIgnoresProxyEnvironment$", "-test.count=1")
+	// A child that matches no test exits with PASS, so the run must name this test
+	// and its verbose output must show that exactly this test passed.
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), proxyChildEnv+"=1", "HTTPS_PROXY="+proxy.URL, "https_proxy="+proxy.URL, "HTTP_PROXY="+proxy.URL, "http_proxy="+proxy.URL, "NO_PROXY=", "no_proxy=")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("child failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()+" ") {
+		t.Fatalf("child did not run %s:\n%s", t.Name(), out)
 	}
 	if proxied.Load() != 0 {
 		t.Fatal("the JWKS request went through the proxy from the environment")
