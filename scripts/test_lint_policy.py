@@ -38,24 +38,55 @@ def module_version(module):
 
 
 # The probe is hermetic: every module it compiles is pinned, so an upstream release cannot break CI.
-# Versions present in go.mod follow it (Renovate updates them there). Renovate does not read the
-# constants below: they are raised by hand in a reviewed PR, when the libraries or services move to a
-# new prometheus/grpc/otel/klog/automaxprocs/automemlimit release, or when the probe needs an API that only a newer release has.
+# Versions present in go.mod follow it exactly (Renovate updates them there). Renovate does not read the
+# hand-pinned constants below: they are raised by hand in a reviewed PR, when the libraries or services move to a
+# new otel/klog/automaxprocs/automemlimit release, or when the probe needs an API that only a newer release has.
+# A go.mod module raised by Renovate may require a newer release of a hand-pinned one (grpc -> otel): go mod tidy
+# then raises it, and the probe accepts any version not lower than the hand pin, so a bot-only PR stays green.
 GO_VERSION = re.search(r"^go (\S+)$", GO_MOD, re.M)[1]
-PINNED = {
-    "github.com/prometheus/client_golang": module_version("github.com/prometheus/client_golang"),
-    "google.golang.org/grpc": module_version("google.golang.org/grpc"),
-    # go-identity does not depend on otel: the probe pins the template's release by hand.
+FROM_GO_MOD = {
+    module: module_version(module)
+    for module in ["github.com/prometheus/client_golang", "google.golang.org/grpc", "golang.org/x/sys"]
+}
+# go-identity does not depend on these: the probe pins the template's releases by hand (minimum versions).
+HAND_PINNED = {
     "go.opentelemetry.io/otel": "v1.44.0",
     "go.opentelemetry.io/otel/log": "v0.20.0",  # the release paired with otel v1.44.0
+    "go.opentelemetry.io/otel/metric": "v1.44.0",
+    "go.opentelemetry.io/otel/trace": "v1.44.0",
     "k8s.io/klog": "v1.0.0",
     "k8s.io/klog/v2": "v2.130.1",
     "go.uber.org/automaxprocs": "v1.6.0",
     "github.com/KimMachineGun/automemlimit": "v1.0.1",
-    "go.opentelemetry.io/otel/metric": "v1.44.0",
-    "go.opentelemetry.io/otel/trace": "v1.44.0",
-    "golang.org/x/sys": module_version("golang.org/x/sys"),
 }
+PINNED = {**FROM_GO_MOD, **HAND_PINNED}
+
+SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+
+
+def semver_key(version):
+    """Orders Go module versions by semver precedence (build metadata ignored)."""
+    match = SEMVER.match(version)
+    if match is None:
+        raise ValueError(f"not a semantic version: {version}")
+    release = tuple(int(part) for part in match.group(1, 2, 3))
+    pre = match[4]
+    if pre is None:
+        return release, (1,)  # a release sorts after every pre-release of the same version
+    identifiers = tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in pre.split("."))
+    return release, (0, identifiers)
+
+
+def pin_holds(module, pinned, resolved):
+    """An exact match for a version from go.mod; for a hand pin, any version not lower than it."""
+    if module in FROM_GO_MOD:
+        return resolved == pinned
+    return semver_key(resolved) >= semver_key(pinned)
+
+
+def resolved_version(go_mod, module):
+    match = re.search(r"^\s*" + re.escape(module) + r" (v\S+)", go_mod, re.M)
+    return match[1] if match else None
 
 PROMETHEUS = "github.com/prometheus/client_golang/prometheus"
 # import path -> identifiers that must be reported; every one is referenced as a value.
@@ -271,6 +302,46 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(workflow["env"]["GOLANGCI_LINT_VERSION"], LINT_VERSION)
 
 
+class PinTests(unittest.TestCase):
+    def test_semver_order(self):
+        ordered = ["v1.0.0-alpha", "v1.0.0-alpha.1", "v1.0.0-alpha.beta", "v1.0.0-beta.2", "v1.0.0-beta.11",
+                   "v1.0.0-rc.1", "v1.0.0", "v1.0.1", "v1.10.0", "v2.0.0"]
+        keys = [semver_key(version) for version in ordered]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(len(set(keys)), len(keys))
+        self.assertEqual(semver_key("v1.2.3+meta"), semver_key("v1.2.3"))
+        with self.assertRaises(ValueError):
+            semver_key("1.2.3")
+
+    def test_hand_pin_is_a_minimum(self):
+        module, pinned = "go.opentelemetry.io/otel", HAND_PINNED["go.opentelemetry.io/otel"]
+        self.assertTrue(pin_holds(module, "v1.44.0", "v1.44.0"))
+        self.assertTrue(pin_holds(module, "v1.44.0", "v1.45.0"))
+        self.assertTrue(pin_holds(module, "v1.44.0", "v2.0.0"))
+        self.assertFalse(pin_holds(module, "v1.44.0", "v1.43.9"))
+        self.assertFalse(pin_holds(module, "v1.44.0", "v1.44.0-rc.1"))
+        self.assertTrue(pin_holds(module, "v1.44.0", "v1.45.0-rc.1"))
+        self.assertEqual(pinned, "v1.44.0")
+
+    def test_go_mod_version_is_exact(self):
+        module = "google.golang.org/grpc"
+        pinned = FROM_GO_MOD[module]
+        self.assertTrue(pin_holds(module, pinned, pinned))
+        major, minor, patch = semver_key(pinned)[0]
+        self.assertFalse(pin_holds(module, pinned, f"v{major}.{minor + 1}.0"))
+        self.assertFalse(pin_holds(module, pinned, f"v{major}.{minor}.{patch}-rc.1"))
+
+    def test_every_hand_pin_is_absent_from_go_mod(self):
+        for module in HAND_PINNED:
+            self.assertIsNone(resolved_version(GO_MOD, module), module)
+
+    def test_resolved_version(self):
+        text = "require (\n\tgo.opentelemetry.io/otel v1.45.0\n\tgo.opentelemetry.io/otel/log v0.21.0 // indirect\n)\n"
+        self.assertEqual(resolved_version(text, "go.opentelemetry.io/otel"), "v1.45.0")
+        self.assertEqual(resolved_version(text, "go.opentelemetry.io/otel/log"), "v0.21.0")
+        self.assertIsNone(resolved_version(text, "k8s.io/klog"))
+
+
 class ProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -308,8 +379,9 @@ class ProbeTests(unittest.TestCase):
             raise AssertionError(tidy.stderr)
         resolved = (root / "go.mod").read_text()
         for module, version in PINNED.items():
-            if not re.search(r"^\s*" + re.escape(module) + " " + re.escape(version) + r"( |$)", resolved, re.M):
-                raise AssertionError(f"tidy moved the pinned {module} off {version}:\n{resolved}")
+            found = resolved_version(resolved, module)
+            if found is None or not pin_holds(module, version, found):
+                raise AssertionError(f"tidy moved the pinned {module} off {version} (got {found}):\n{resolved}")
 
     @classmethod
     def tearDownClass(cls):
