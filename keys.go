@@ -216,10 +216,10 @@ type parsedJWKS struct {
 
 // parseJWKS skips a JWK whose type or purpose is not supported (RFC 7517,
 // section 5) and rejects the whole set for clearly broken data: invalid JSON,
-// size or count limits, a missing or duplicate kid (counted over skipped keys
-// too), bad material of a supported key type, a weak RSA key, or no supported
-// key at all. A token whose kid belongs to a skipped key is rejected as one with
-// an unknown kid, never verified.
+// size or count limits, a missing kty, a missing or duplicate kid (counted over
+// skipped keys too), bad material of a supported key type, a weak RSA key, or no
+// supported key at all. A token whose kid belongs to a skipped key is rejected as
+// one with an unknown kid, never verified.
 func parseJWKS(data []byte) (parsedJWKS, error) {
 	invalid := errors.New("identity: invalid JWKS")
 	if len(data) > maxJWKS {
@@ -232,7 +232,9 @@ func parseJWKS(data []byte) (parsedJWKS, error) {
 	result := parsedJWKS{byKID: make(map[string]verificationKey, len(set.Keys)), skipped: map[string]int{}}
 	seen := make(map[string]struct{}, len(set.Keys))
 	for _, j := range set.Keys {
-		if j.Kid == "" || len(j.Kid) > 256 {
+		// kty is REQUIRED by RFC 7517 (4.1), like the kid this library relies on:
+		// a key without it is broken data, not an unsupported type.
+		if j.Kid == "" || len(j.Kid) > 256 || j.Kty == "" {
 			return parsedJWKS{}, invalid
 		}
 		// A kid must name one key in the published set whatever this library
