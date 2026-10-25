@@ -1000,3 +1000,208 @@ func TestIntegrationJWKSProjectedCredentialOutage(t *testing.T) {
 		t.Fatal("JWKS sent with missing or malformed credential")
 	}
 }
+
+// switchableJWKS is a TLS JWKS endpoint that a test can take down with a 503.
+func switchableJWKS(t *testing.T, body []byte) (*httptest.Server, *atomic.Bool, *atomic.Int32) {
+	t.Helper()
+	down, requests := new(atomic.Bool), new(atomic.Int32)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		if down.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+	return server, down, requests
+}
+
+func TestIntegrationTLSJWKSOutageIsNotInvalidToken(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	pub, key := testKey(t)
+	server, down, requests := switchableJWKS(t, jwks(t, map[string]ed25519.PublicKey{"one": pub}))
+	provider, err := identity.NewHTTPKeys(server.Client(), server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := identity.NewKeyCache(provider, func() time.Time { return now }, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	metrics, err := identity.NewMetrics(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := opts(&now)
+	o.Observer = metrics
+	verifier, err := identity.NewUserVerifier(cache, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	down.Store(true)
+	if _, err := verifier.VerifyUser(t.Context(), sign(t, key, jwt.SigningMethodEdDSA, "one", baseClaims(now))); status.Code(err) != codes.Unavailable {
+		t.Fatal("startup outage is not UNAVAILABLE", err)
+	}
+	now = now.Add(time.Minute)
+	down.Store(false)
+	if id, err := verifier.VerifyUser(t.Context(), sign(t, key, jwt.SigningMethodEdDSA, "one", baseClaims(now))); err != nil || id != "user-1" {
+		t.Fatal(id, err)
+	}
+	if rest, ok := finerr.ToREST(func() error {
+		_, e := verifier.VerifyUser(t.Context(), sign(t, key, jwt.SigningMethodEdDSA, "forged", baseClaims(now)))
+		return e
+	}()); !ok || rest.Code != "INVALID_TOKEN" {
+		t.Fatal("unknown kid with fresh keys is not INVALID_TOKEN")
+	}
+	// The snapshot outlives its maximum age while the endpoint is down.
+	down.Store(true)
+	now = now.Add(2 * time.Minute)
+	for range 3 {
+		_, err := verifier.VerifyUser(t.Context(), sign(t, key, jwt.SigningMethodEdDSA, "one", baseClaims(now)))
+		if status.Code(err) != codes.Unavailable || len(status.Convert(err).Details()) != 0 {
+			t.Fatal("expired snapshot during outage is not a bare UNAVAILABLE", err)
+		}
+	}
+	if requests.Load() != 3 {
+		t.Fatalf("outage requests=%d, the minute limit was not kept", requests.Load())
+	}
+	families, err := reg.Gather()
+	if err != nil || len(families) != 1 {
+		t.Fatal(err)
+	}
+	counts := map[string]float64{}
+	for _, m := range families[0].Metric {
+		for _, l := range m.Label {
+			if l.GetName() == "reason" {
+				counts[l.GetValue()] += m.GetCounter().GetValue()
+			}
+		}
+	}
+	if counts["key_unavailable"] != 4 || counts["unknown_key"] != 1 || counts["invalid"] != 0 {
+		t.Fatalf("rejection reasons=%v", counts)
+	}
+}
+
+func TestAPIConsumerKeyOutageKeepsSession(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	userPub, userKey := testKey(t)
+	bffPub, bffKey := testKey(t)
+	clusterPub, clusterKey := testKey(t)
+	clock := func() time.Time { return now }
+	// bank-bff verifies the user against healthy keys; analytics has lost its keys.
+	bffUsers := userVerifier(t, userPub, &now)
+	endpoint, down, _ := switchableJWKS(t, jwks(t, map[string]ed25519.PublicKey{"one": userPub}))
+	down.Store(true)
+	provider, err := identity.NewHTTPKeys(endpoint.Client(), endpoint.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := identity.NewKeyCache(provider, clock, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyticsUsers, err := identity.NewUserVerifier(cache, opts(&now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := identity.NewStageVerifier("stage", identity.VerifyOptions{Issuer: "stage", Audience: "finassist-internal", Clock: clock}, map[string]ed25519.PublicKey{"bank-bff": bffPub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	method := analyticsv1.AnalyticsService_GetAnalytics_FullMethodName
+	access, err := identity.NewServer(identity.AccessTable{method: {"bank-bff": identity.User}}, services, analyticsUsers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := new(analyticsAPI)
+	server := grpc.NewServer(grpc.ChainUnaryInterceptor(access.Unary()))
+	analyticsv1.RegisterAnalyticsServiceServer(server, api)
+	source, err := identity.NewStageSource("stage", identity.StageOptions{KeyFile: writeKey(t, bffKey), Caller: "bank-bff", Issuer: "stage", Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := analyticsv1.NewAnalyticsServiceClient(dialServer(t, server, source))
+	// The service's contract writer: a registry error by its spec, anything else 500.
+	writer := func(w http.ResponseWriter, _ *http.Request, e error) {
+		if rest, ok := finerr.ToREST(e); ok {
+			w.WriteHeader(rest.Spec.HTTPStatus)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	middleware, err := identity.NewHTTP(bffUsers, writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, e := client.GetAnalytics(r.Context(), &analyticsv1.GetAnalyticsRequest{})
+		if e == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if status.Code(e) != codes.Unavailable || len(status.Convert(e).Details()) != 0 {
+			t.Errorf("downstream key outage is not a bare UNAVAILABLE: %v", e)
+		}
+		writer(w, r, e)
+	}))
+	serve := func() int {
+		r := httptest.NewRequest(http.MethodGet, "/v1/analytics", nil)
+		r.Header.Set("Authorization", "Bearer "+sign(t, userKey, jwt.SigningMethodEdDSA, "one", baseClaims(now)))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := serve(); code != http.StatusInternalServerError || api.calls.Load() != 0 {
+		t.Fatalf("outage answered %d (handler calls %d); a 401 would log the user out", code, api.calls.Load())
+	}
+	now = now.Add(time.Minute)
+	down.Store(false)
+	if code := serve(); code != http.StatusNoContent || api.calls.Load() != 1 {
+		t.Fatalf("recovered keys answered %d", code)
+	}
+
+	// A Kubernetes receiver without cluster keys answers a bare UNAVAILABLE as well.
+	cluster, clusterDown, _ := switchableJWKS(t, jwks(t, map[string]ed25519.PublicKey{"cluster": clusterPub}))
+	clusterDown.Store(true)
+	clusterProvider, err := identity.NewHTTPKeys(cluster.Client(), cluster.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clusterCache, err := identity.NewKeyCache(clusterProvider, clock, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kubernetes, err := identity.NewKubernetesVerifier(clusterCache, identity.VerifyOptions{Issuer: "cluster", Audience: "finassist-internal", Clock: clock}, "finassist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := identity.NewServer(identity.AccessTable{method: {"assistant": identity.System}}, kubernetes, analyticsUsers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	systemServer := grpc.NewServer(grpc.ChainUnaryInterceptor(system.Unary()))
+	systemAPI := new(analyticsAPI)
+	analyticsv1.RegisterAnalyticsServiceServer(systemServer, systemAPI)
+	projected := func(kid string) identity.TokenSource {
+		return tokenFunc(func(context.Context) (string, error) {
+			claims := jwt.MapClaims{"iss": "cluster", "aud": "finassist-internal", "sub": "system:serviceaccount:finassist:assistant", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "kubernetes.io": map[string]any{"namespace": "finassist", "serviceaccount": map[string]any{"name": "assistant"}}}
+			return sign(t, clusterKey, jwt.SigningMethodEdDSA, kid, claims), nil
+		})
+	}
+	systemClient := analyticsv1.NewAnalyticsServiceClient(dialServer(t, systemServer, projected("cluster")))
+	request := &analyticsv1.GetAnalyticsRequest{UserId: proto.String("user-1")}
+	if _, err := systemClient.GetAnalytics(t.Context(), request); status.Code(err) != codes.Unavailable || len(status.Convert(err).Details()) != 0 || systemAPI.calls.Load() != 0 {
+		t.Fatal("cluster key outage is not a bare UNAVAILABLE", err)
+	}
+	now = now.Add(time.Minute)
+	clusterDown.Store(false)
+	if _, err := systemClient.GetAnalytics(t.Context(), request); err != nil || systemAPI.calls.Load() != 1 {
+		t.Fatal("recovered cluster keys refused", err)
+	}
+	forgedClient := analyticsv1.NewAnalyticsServiceClient(dialServer(t, systemServer, projected("forged")))
+	if _, err := forgedClient.GetAnalytics(t.Context(), request); status.Code(err) != codes.Unauthenticated || systemAPI.calls.Load() != 1 {
+		t.Fatal("unknown cluster kid is not a bare UNAUTHENTICATED", err)
+	}
+}

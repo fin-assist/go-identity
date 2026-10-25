@@ -27,6 +27,14 @@ type JWKSProvider interface {
 	JWKS(context.Context) ([]byte, error)
 }
 
+// errKeysUnavailable means no fresh trusted snapshot could be obtained: the
+// provider failed, returned an invalid set, or the last attempt failed within the
+// refresh rate limit. It says nothing about the token being verified.
+var errKeysUnavailable = errors.New("identity: keys unavailable")
+
+// errUnknownKey means a fresh trusted snapshot has no key with the token's kid.
+var errUnknownKey = errors.New("identity: unknown key ID")
+
 type verificationKey struct {
 	algorithm string
 	public    crypto.PublicKey
@@ -35,6 +43,7 @@ type verificationKey struct {
 // KeyCache caches an immutable JWKS snapshot. It is safe for concurrent use.
 // Refreshes, including failed ones and unknown kids, are limited to once a minute.
 // A snapshot older than its interval is not used after a failed refresh.
+// Lookups distinguish an unavailable snapshot from an unknown kid in a fresh one.
 type KeyCache struct {
 	provider           JWKSProvider
 	clock              func() time.Time
@@ -44,6 +53,9 @@ type KeyCache struct {
 	keys               map[string]verificationKey
 	updated, attempted time.Time
 	hasAttempt         bool
+	// lastErr is the result of the last network attempt, reported to callers
+	// that the rate limit stops from retrying. Guarded by gate.
+	lastErr error
 }
 
 // NewKeyCache requires a provider, an injected clock and a maximum snapshot age of at least
@@ -55,6 +67,8 @@ func NewKeyCache(provider JWKSProvider, clock func() time.Time, interval time.Du
 	return &KeyCache{provider: provider, clock: clock, interval: interval, gate: make(chan struct{}, 1)}, nil
 }
 
+// key returns the key for kid, the context error, errKeysUnavailable when no
+// fresh snapshot is available, or errUnknownKey when a fresh one lacks kid.
 func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error) {
 	if err := ctx.Err(); err != nil {
 		return verificationKey{}, err
@@ -74,13 +88,19 @@ func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error)
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.keys == nil || c.clock().Sub(c.updated) >= c.interval {
+		return verificationKey{}, errKeysUnavailable
+	}
 	k, ok = c.keys[kid]
-	if !ok || c.clock().Sub(c.updated) >= c.interval {
-		return verificationKey{}, errors.New("identity: key unavailable")
+	if !ok {
+		return verificationKey{}, errUnknownKey
 	}
 	return k, nil
 }
 
+// refresh loads a new snapshot at most once a minute. It returns the context
+// error, nil when the latest attempt succeeded, or errKeysUnavailable when the
+// latest attempt (this one or a rate-limited earlier one) failed.
 func (c *KeyCache) refresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -96,22 +116,25 @@ func (c *KeyCache) refresh(ctx context.Context) error {
 	}
 	now := c.clock()
 	if c.hasAttempt && now.Sub(c.attempted) < time.Minute {
-		return nil
+		return c.lastErr
 	}
 	c.attempted, c.hasAttempt = now, true
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	data, err := c.provider.JWKS(ctx)
 	if err != nil {
-		return errors.New("identity: key fetch failed")
+		c.lastErr = errKeysUnavailable
+		return c.lastErr
 	}
 	keys, err := parseJWKS(data)
 	if err != nil {
-		return err
+		c.lastErr = errKeysUnavailable
+		return c.lastErr
 	}
 	c.mu.Lock()
 	c.keys, c.updated = keys, c.clock()
 	c.mu.Unlock()
+	c.lastErr = nil
 	return nil
 }
 
