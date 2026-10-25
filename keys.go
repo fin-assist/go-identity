@@ -65,32 +65,6 @@ func NewKeyCache(provider JWKSProvider, clock func() time.Time, interval time.Du
 	return &KeyCache{provider: provider, clock: clock, interval: interval, gate: make(chan struct{}, 1)}, nil
 }
 
-// NewObservedKeyCache is NewKeyCache that also reports skipped JWKs of each
-// installed snapshot to observer (for example *Metrics). kind is "user" for user
-// keys or "service" for Kubernetes keys; observer is required.
-func NewObservedKeyCache(provider JWKSProvider, clock func() time.Time, interval time.Duration, kind string, observer KeyObserver) (*KeyCache, error) {
-	if (kind != "user" && kind != "service") || observer == nil {
-		return nil, errors.New("identity: invalid key cache observer")
-	}
-	c, err := NewKeyCache(provider, clock, interval)
-	if err != nil {
-		return nil, err
-	}
-	c.kind, c.observer = kind, observer
-	return c, nil
-}
-
-// observeSkipped reports a newly installed snapshot. It runs under the refresh
-// gate, so reports of one cache never interleave.
-func (c *KeyCache) observeSkipped(skipped map[string]int) {
-	if c.observer == nil {
-		return
-	}
-	for _, reason := range skipReasons() {
-		c.observer.SkippedKeys(c.kind, reason, skipped[reason])
-	}
-}
-
 func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error) {
 	if err := ctx.Err(); err != nil {
 		return verificationKey{}, err
@@ -181,6 +155,32 @@ func (c *KeyCache) run(ctx context.Context, ticks <-chan time.Time) error {
 		case <-ticks:
 			c.refreshIfDue(ctx)
 		}
+	}
+}
+
+// NewObservedKeyCache is NewKeyCache that also reports skipped JWKs of each
+// installed snapshot to observer (for example *Metrics). kind is "user" for user
+// keys or "service" for Kubernetes keys; observer is required.
+func NewObservedKeyCache(provider JWKSProvider, clock func() time.Time, interval time.Duration, kind string, observer KeyObserver) (*KeyCache, error) {
+	if (kind != "user" && kind != "service") || observer == nil {
+		return nil, errors.New("identity: invalid key cache observer")
+	}
+	c, err := NewKeyCache(provider, clock, interval)
+	if err != nil {
+		return nil, err
+	}
+	c.kind, c.observer = kind, observer
+	return c, nil
+}
+
+// observeSkipped reports a newly installed snapshot. It runs under the refresh
+// gate, so reports of one cache never interleave.
+func (c *KeyCache) observeSkipped(skipped map[string]int) {
+	if c.observer == nil {
+		return
+	}
+	for _, reason := range skipReasons() {
+		c.observer.SkippedKeys(c.kind, reason, skipped[reason])
 	}
 }
 
