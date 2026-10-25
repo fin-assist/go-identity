@@ -68,11 +68,24 @@ func TestUnitKeyCacheSeparatesOutageFromUnknownKey(t *testing.T) {
 	if p.calls != 2 {
 		t.Fatalf("calls=%d", p.calls)
 	}
-	// An unknown kid whose refresh fails cannot be judged against current keys.
+	// A failed refresh for an unknown kid is still judged by the fresh snapshot:
+	// a random kid cannot turn a provider outage into UNAVAILABLE.
 	now = now.Add(time.Minute)
 	p.fail = true
-	if _, err := cache.key(context.Background(), "rotated"); !errors.Is(err, errKeysUnavailable) {
-		t.Fatal("failed refresh for unknown kid reported as a verdict", err)
+	for _, kid := range []string{"rotated", "random", "one"} {
+		k, err := cache.key(context.Background(), kid)
+		if kid == "one" {
+			if err != nil || k.algorithm != "EdDSA" {
+				t.Fatal("known key lost after a failed refresh", err)
+			}
+			continue
+		}
+		if !errors.Is(err, errUnknownKey) {
+			t.Fatal("unknown kid in a fresh snapshot not judged after a failed refresh", err)
+		}
+	}
+	if p.calls != 3 {
+		t.Fatalf("calls=%d, failed refresh not rate limited", p.calls)
 	}
 	// The snapshot expires during the outage: known keys are no longer trusted.
 	now = now.Add(10 * time.Minute)
@@ -369,5 +382,34 @@ func TestIntegrationUsageKeyOutageThroughInterceptors(t *testing.T) {
 	}
 	if !slices.Contains(seen.reasons, "user:key_unavailable") || slices.Contains(seen.reasons, "user:invalid") {
 		t.Fatalf("reasons=%v", seen.reasons)
+	}
+}
+
+// A failed proactive refresh inside the minute limit must not turn an unknown kid
+// into an outage while the snapshot is fresh: the stored snapshot judges it.
+func TestUnitFailedProactiveRefreshKeepsUnknownKidVerdict(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	pub, _ := testKey(t)
+	p := &switchProvider{data: jwks(t, map[string]ed25519.PublicKey{"one": pub})}
+	cache, err := NewKeyCache(p, func() time.Time { return now }, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.refreshIfDue(context.Background())
+	now = now.Add(5 * time.Minute)
+	p.fail = true
+	cache.refreshIfDue(context.Background())
+	if p.calls != 2 {
+		t.Fatalf("proactive refresh at half the interval did not run: calls=%d", p.calls)
+	}
+	now = now.Add(30 * time.Second)
+	if _, err := cache.key(context.Background(), "unknown"); !errors.Is(err, errUnknownKey) {
+		t.Fatal("unknown kid after a failed proactive refresh is not a verdict", err)
+	}
+	if k, err := cache.key(context.Background(), "one"); err != nil || k.algorithm != "EdDSA" {
+		t.Fatal("known key lost after a failed proactive refresh", err)
+	}
+	if p.calls != 2 {
+		t.Fatalf("unknown kid bypassed the minute limit: calls=%d", p.calls)
 	}
 }

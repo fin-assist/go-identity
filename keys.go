@@ -53,9 +53,6 @@ type KeyCache struct {
 	keys               map[string]verificationKey
 	updated, attempted time.Time
 	hasAttempt         bool
-	// lastErr is the result of the last network attempt, reported to callers
-	// that the rate limit stops from retrying. Guarded by gate.
-	lastErr error
 }
 
 // NewKeyCache requires a provider, an injected clock and a maximum snapshot age of at least
@@ -80,9 +77,9 @@ func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error)
 	if ok && fresh {
 		return k, nil
 	}
-	if err := c.refresh(ctx); err != nil {
-		return verificationKey{}, err
-	}
+	// A failed refresh is not a verdict by itself: a fresh snapshot still judges
+	// the kid below, so a random kid cannot turn a key outage into UNAVAILABLE.
+	_ = c.refresh(ctx)
 	if err := ctx.Err(); err != nil {
 		return verificationKey{}, err
 	}
@@ -99,8 +96,8 @@ func (c *KeyCache) key(ctx context.Context, kid string) (verificationKey, error)
 }
 
 // refresh loads a new snapshot at most once a minute. It returns the context
-// error, nil when the latest attempt succeeded, or errKeysUnavailable when the
-// latest attempt (this one or a rate-limited earlier one) failed.
+// error, errKeysUnavailable when this attempt failed, or nil (including when the
+// rate limit skipped the attempt). Callers judge the stored snapshot afterwards.
 func (c *KeyCache) refresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -116,25 +113,22 @@ func (c *KeyCache) refresh(ctx context.Context) error {
 	}
 	now := c.clock()
 	if c.hasAttempt && now.Sub(c.attempted) < time.Minute {
-		return c.lastErr
+		return nil
 	}
 	c.attempted, c.hasAttempt = now, true
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	data, err := c.provider.JWKS(ctx)
 	if err != nil {
-		c.lastErr = errKeysUnavailable
-		return c.lastErr
+		return errKeysUnavailable
 	}
 	keys, err := parseJWKS(data)
 	if err != nil {
-		c.lastErr = errKeysUnavailable
-		return c.lastErr
+		return errKeysUnavailable
 	}
 	c.mu.Lock()
 	c.keys, c.updated = keys, c.clock()
 	c.mu.Unlock()
-	c.lastErr = nil
 	return nil
 }
 

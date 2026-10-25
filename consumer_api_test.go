@@ -1055,8 +1055,20 @@ func TestIntegrationTLSJWKSOutageIsNotInvalidToken(t *testing.T) {
 	}()); !ok || rest.Code != "INVALID_TOKEN" {
 		t.Fatal("unknown kid with fresh keys is not INVALID_TOKEN")
 	}
-	// The snapshot outlives its maximum age while the endpoint is down.
+	// The endpoint goes down while the snapshot is fresh: a random kid triggers a
+	// failed refresh but is still judged invalid, not reported as an outage.
 	down.Store(true)
+	now = now.Add(time.Minute)
+	if rest, ok := finerr.ToREST(func() error {
+		_, e := verifier.VerifyUser(t.Context(), sign(t, key, jwt.SigningMethodEdDSA, "random", baseClaims(now)))
+		return e
+	}()); !ok || rest.Code != "INVALID_TOKEN" {
+		t.Fatal("random kid during an outage with fresh keys is not INVALID_TOKEN")
+	}
+	if requests.Load() != 3 {
+		t.Fatalf("random kid did not try to refresh: requests=%d", requests.Load())
+	}
+	// The snapshot outlives its maximum age while the endpoint is down.
 	now = now.Add(2 * time.Minute)
 	for range 3 {
 		_, err := verifier.VerifyUser(t.Context(), sign(t, key, jwt.SigningMethodEdDSA, "one", baseClaims(now)))
@@ -1064,7 +1076,7 @@ func TestIntegrationTLSJWKSOutageIsNotInvalidToken(t *testing.T) {
 			t.Fatal("expired snapshot during outage is not a bare UNAVAILABLE", err)
 		}
 	}
-	if requests.Load() != 3 {
+	if requests.Load() != 4 {
 		t.Fatalf("outage requests=%d, the minute limit was not kept", requests.Load())
 	}
 	families, err := reg.Gather()
@@ -1079,7 +1091,7 @@ func TestIntegrationTLSJWKSOutageIsNotInvalidToken(t *testing.T) {
 			}
 		}
 	}
-	if counts["key_unavailable"] != 4 || counts["unknown_key"] != 1 || counts["invalid"] != 0 {
+	if counts["key_unavailable"] != 4 || counts["unknown_key"] != 2 || counts["invalid"] != 0 {
 		t.Fatalf("rejection reasons=%v", counts)
 	}
 }
@@ -1200,8 +1212,15 @@ func TestAPIConsumerKeyOutageKeepsSession(t *testing.T) {
 	if _, err := systemClient.GetAnalytics(t.Context(), request); err != nil || systemAPI.calls.Load() != 1 {
 		t.Fatal("recovered cluster keys refused", err)
 	}
+	// The API server goes down while cluster keys are fresh: a forged kid makes the
+	// refresh fail but is still refused as unauthenticated, and known keys keep working.
+	clusterDown.Store(true)
+	now = now.Add(time.Minute)
 	forgedClient := analyticsv1.NewAnalyticsServiceClient(dialServer(t, systemServer, projected("forged")))
-	if _, err := forgedClient.GetAnalytics(t.Context(), request); status.Code(err) != codes.Unauthenticated || systemAPI.calls.Load() != 1 {
-		t.Fatal("unknown cluster kid is not a bare UNAUTHENTICATED", err)
+	if _, err := forgedClient.GetAnalytics(t.Context(), request); status.Code(err) != codes.Unauthenticated || len(status.Convert(err).Details()) != 0 || systemAPI.calls.Load() != 1 {
+		t.Fatal("unknown cluster kid during an outage is not a bare UNAUTHENTICATED", err)
+	}
+	if _, err := systemClient.GetAnalytics(t.Context(), request); err != nil || systemAPI.calls.Load() != 2 {
+		t.Fatal("fresh cluster keys refused after a failed refresh", err)
 	}
 }
