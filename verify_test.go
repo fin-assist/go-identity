@@ -188,14 +188,14 @@ func TestUnitAlgorithms(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			v, e := newVerifier(opts(&now), []string{tc.name}, func(context.Context, string) (verificationKey, error) { return keys["k"], nil })
+			v, e := newVerifier(opts(&now), []string{tc.name}, func(context.Context, string) (verificationKey, error) { return keys.byKID["k"], nil })
 			if e != nil {
 				t.Fatal(e)
 			}
 			if _, _, e := v.parse(context.Background(), sign(t, tc.key, tc.alg, "k", baseClaims(now)), "user"); e != nil {
 				t.Fatal(e)
 			}
-			wrong := keys["k"]
+			wrong := keys.byKID["k"]
 			wrong.algorithm = "wrong"
 			v.key = func(context.Context, string) (verificationKey, error) { return wrong, nil }
 			if _, _, e := v.parse(context.Background(), sign(t, tc.key, tc.alg, "k", baseClaims(now)), "user"); e == nil {

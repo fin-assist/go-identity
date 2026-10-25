@@ -79,3 +79,18 @@ func ExampleSystemUserID() {
 	}
 	_ = handler // Register in a System method, check its error before accessing data.
 }
+
+func ExampleNewObservedKeyCache() {
+	// The service owns the HTTP client (cluster CA), the registry and the job lifecycle.
+	var client *http.Client
+	provider, err := identity.NewHTTPKeys(client, "https://kubernetes.default.svc/openid/v1/jwks", nil)
+	if err != nil {
+		return
+	}
+	var metrics *identity.Metrics // identity.NewMetrics(serviceRegistry), shared with verifiers.
+	keys, err := identity.NewObservedKeyCache(provider, time.Now, time.Hour, "service", metrics)
+	if err != nil {
+		return
+	}
+	_ = keys // Pass to NewKubernetesVerifier; unsupported JWKs show up in finassist_identity_jwks_skipped_keys.
+}
