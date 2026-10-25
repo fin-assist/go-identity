@@ -17,10 +17,66 @@
 | `tokens.go` | projected-файл и подпись короткого JWT ключом стенда |
 | `context.go`, `grpc.go`, `http.go` | контекст, таблица доступа, серверные и клиентские интерцепторы, HTTP-middleware |
 | `metrics.go` | метрики отказов и пропущенных JWK без пользовательских идентификаторов |
+| `assembly.go` | готовая сборка для сервиса: `NewAssembly` (prod — Kubernetes, stage — ключи из файлов, ключи пользователя, метрики, `Run`) |
 | `*_test.go` | unit, TLS/файловые интеграции, usage HTTP → gRPC и ServiceAccount → gRPC на bufconn |
 | `docs/releasing.md`, `CHANGELOG.md` | версии и совместимость |
 
 ## Внедрение
+
+### 0. Готовая сборка: `NewAssembly` (FIN-273)
+
+Сервис вызывает один конструктор вместо собственной копии сборки в `internal/app`. Шаги 1–3 ниже описывают детали, которые `NewAssembly` уже выполняет; отдельные конструкторы остаются для особых случаев.
+
+`NewAssembly(AssemblyOptions)` строит:
+
+- в `Env: "prod"` — проверку ServiceAccount Kubernetes: JWKS API-сервера по HTTPS с доверием только к `CAFile` (прокси из окружения не используется), отдельный API-токен пода для запроса JWKS, кэш на час, проверку namespace и `sub`; исходящий токен — projected-файл `finassist-internal`;
+- в `Env: "stage"` — короткие JWT стенда: исходящие подписываются собственным PKCS#8 Ed25519 ключом (`kid` = `sub` = имя сервиса, TTL 1 минута), входящие проверяются по JWKS ключей сервисов стенда (только OKP Ed25519, `kid` — имя сервиса; неподдерживаемый или чужой по форме ключ отклоняет весь файл);
+- в обоих — проверку access JWT пользователя по ключам `user.GetSigningKeys` (кэш на 10 минут) и метрики `finassist_identity_rejected_total`, `finassist_identity_jwks_skipped_keys` (шаг 6).
+
+`dev`, пустое и любое другое значение `Env` отклоняются: `AUTH_MODE=insecure-dev` с dev-токенами go-grpc остаётся кодом сервиса и допустим только при `ENV=dev`. Файлы стенда, заданные в `prod`, — ошибка старта. Отказ конструктора не оставляет зарегистрированных метрик и открытых соединений; перехода на более слабый режим нет. Библиотека не читает переменные окружения: сервис переносит свою конфигурацию в поля опций.
+
+| Переменная сервиса | Поле `AssemblyOptions` | По умолчанию |
+|---|---|---|
+| `ENV` | `Env` | — (`prod` или `stage`) |
+| `SERVICE_NAME` | `Service` | — |
+| `AUTH_USER_ISSUER`, `AUTH_USER_AUDIENCE` | `UserIssuer`, `UserAudience` | — (обязательны) |
+| `SERVICE_TOKEN_FILE` | `Kubernetes.TokenFile` | — (обязателен в prod, отличается от API-токена) |
+| `AUTH_KUBERNETES_ISSUER` | `Kubernetes.Issuer` | `https://kubernetes.default.svc.cluster.local` |
+| `AUTH_KUBERNETES_JWKS_URL` | `Kubernetes.JWKSURL` | `https://kubernetes.default.svc/openid/v1/jwks` |
+| `AUTH_KUBERNETES_CA_FILE` | `Kubernetes.CAFile` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` |
+| `AUTH_KUBERNETES_API_TOKEN_FILE` | `Kubernetes.APITokenFile` | `/var/run/secrets/kubernetes.io/serviceaccount/token` |
+| `AUTH_KUBERNETES_NAMESPACE` | `Kubernetes.Namespace` | `finassist` |
+| `AUTH_STAGE_ISSUER` | `Stage.Issuer` | — (обязателен в stage) |
+| `AUTH_STAGE_SIGNING_KEY_FILE` | `Stage.SigningKeyFile` | — (обязателен в stage) |
+| `AUTH_STAGE_PUBLIC_KEYS_FILE` | `Stage.PublicKeysFile` | — (обязателен в stage) |
+
+Пустое поле `Kubernetes` получает значение по умолчанию, поэтому сервис может передавать значения своих переменных как есть. Имена переменных — рекомендация для шаблона и сервисов (решение владельца FIN-273: набор `AUTH_*` assistant); `user` переходит на них отдельной задачей вместе с манифестами.
+
+```go
+id, err := identity.NewAssembly(identity.AssemblyOptions{
+    Env: string(cfg.Env), Service: cfg.Service,
+    UserIssuer: cfg.Auth.UserIssuer, UserAudience: cfg.Auth.UserAudience,
+    DialUser: func(tokens identity.TokenSource) (*grpc.ClientConn, error) {
+        return client.Dial(cfg.Peers["user"], client.Options{
+            Peer: "user", Tokens: tokens,
+            Retry: []string{"finassist.user.v1.UserInternalService/GetSigningKeys"},
+        })
+    },
+    Kubernetes: identity.KubernetesOptions{TokenFile: cfg.ServiceTokenFile, Issuer: cfg.Auth.KubernetesIssuer /* … */},
+    Stage:      identity.StageKeyFiles{ /* только при ENV=stage */ },
+    Clock:      time.Now, Registerer: registry,
+})
+if err != nil { return err }
+deps := server.Deps{Services: id, Users: id /* Logger, Metrics, Policy, Tombstones */}
+jobs := []worker.Job{{Name: "identity-keys", Run: id.Run}}
+// Исходящие соединения: client.Options{Tokens: id}. При остановке, после завершения Run: id.Close().
+```
+
+- `*Assembly` реализует `VerifyService`, `VerifyUser` и `Token` — интерфейсы `server.ServiceVerifier`, `server.UserVerifier`, `client.TokenSource` из go-grpc, а также `ServiceChecker`/`UserChecker` этой библиотеки (`NewServer`, `NewHTTP` в bank-bff). Вторую цепочку аутентификации не ставьте.
+- `DialUser` вызывается один раз в конструкторе с исходящим источником токенов сборки; соединение принадлежит сборке и закрывается в `Close`. Повторы — только `GetSigningKeys`. Сам `user` вместо `DialUser` передаёт `UserKeys` — локальный `JWKSProvider` своих публичных ключей, без вызова собственного RPC. Задаётся ровно одно из двух.
+- Конструктор ключей не загружает и горутин не запускает. `Run(ctx)` — задание сервиса: обновляет кэш ключей пользователя и, в prod, Kubernetes по правилам шага 3 и возвращает `ctx.Err()` после остановки всех циклов. До запуска `Run` ключи загружаются лениво на первом запросе.
+- Часы и реестр обязательны; логгер не нужен — библиотека ничего не журналирует, сбои ключей видны по `finassist_identity_rejected_total{reason="key_unavailable"}`.
+- Стенд: ротация ключа сервиса требует перезапуска (файлы читаются при старте), см. шаг 3.
 
 ### 1. Зависимость и настройки
 

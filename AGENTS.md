@@ -33,7 +33,7 @@ for itself: what it does, its YouTrack issue, which services use it.
 | What | Where |
 |---|---|
 | Package documentation: what the library does, what it needs from the service | `doc.go` |
-| Public API of the library | root package: `verify.go`, `keys.go`, `providers.go`, `tokens.go`, `context.go`, `grpc.go`, `http.go`, `metrics.go` |
+| Public API of the library | root package: `verify.go`, `keys.go`, `providers.go`, `tokens.go`, `context.go`, `grpc.go`, `http.go`, `metrics.go`, `assembly.go` (service assembly, FIN-273) |
 | Implementation details | `internal/` |
 | Integration guide for services | `README.md`, «Внедрение» |
 | Versions, compatibility, releases, Renovate | `docs/releasing.md`, `CHANGELOG.md`, `.github/workflows/release.yml`, `renovate.json` |
@@ -54,6 +54,7 @@ the PR with why it is needed: every service that imports the library inherits it
 - User access tokens: Ed25519 / ES256, required exp/iss/aud/sub; iat/nbf allow 5 seconds of skew while exp stays strict; errors use `finerr.InvalidToken` (including expired access tokens). Kubernetes additionally binds namespace, serviceaccount name and sub. Stage keys bind kid=sub to one service, and both stage constructors reject prod/unknown environments.
 - `Server` copies an exact method/caller/model table. `UserID` is only a verified sub; `SystemUserID` accepts a request field only after System admission. Streams check identity on admission and user_id on each RecvMsg. Client interceptors forward only a package-verified access token.
 - JWKS parsing (FIN-311) skips a JWK of unsupported type or purpose (unknown kty/crv/alg, use other than sig, key_ops without verify, RSA over 4096 bits) and rejects the whole set for broken data (JSON, limits, missing or duplicate kid across all keys including skipped ones, bad material of a supported type, weak RSA, nothing supported). A skipped kid is an unknown kid. `NewObservedKeyCache` reports skipped keys per snapshot to the `finassist_identity_jwks_skipped_keys` gauge.
+- `NewAssembly` (FIN-273) is the one constructor services call: Env `prod` builds Kubernetes service identity (CA-pinned HTTPS JWKS with a separate API token, projected outgoing token), `stage` builds file-key stage identity; every other Env, including `dev`, is refused, and stage key files are refused in prod. User keys come from `DialUser` (a service-owned go-grpc connection carrying the assembly's tokens) or, in the user service, a local `UserKeys` provider. It reads only configured files, never the environment; a failed construction leaves nothing registered or open. `Run` drives every key cache and `Close` releases the connection and transport. The usage tests wire it into the go-grpc server/client chain (go-grpc is a test-only dependency).
 - Integration/usage tests use TLS httptest, actual files and generated gRPC clients on bufconn; this library has no database or migrations and requires no PostgreSQL.
 - Services migrating from the template must adapt its context accessors/tombstone chain; the library context is distinct. See README bootstrap and wiring.
 
