@@ -1,6 +1,6 @@
 # Изменения
 
-Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии и выпуск — [docs/releasing.md](docs/releasing.md). Каждый PR, который меняет API или поведение библиотеки, добавляет строку в «Unreleased»; при выпуске раздел получает номер версии и дату.
+Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии и выпуск — [docs/releasing.md](docs/releasing.md). Каждый PR библиотеки, включая документацию, тесты и CI, добавляет строку в «Unreleased»; исключение — полностью ботские PR Renovate только с зависимостями, их сводку по `go.mod` добавляет PR выпуска. При выпуске раздел получает номер версии и дату.
 
 ## [Unreleased]
 
@@ -20,6 +20,7 @@
 
 ### Изменено
 
+- FIN-334 (FIN-308, FIN-309): перенесены из go-library-template запреты `forbidigo`/`depguard` FIN-294 — стандартные логгеры (`fmt.Print*`, `slog`/`log` пакета, `grpclog`), глобальный реестр метрик (`prometheus.DefaultRegisterer`/`DefaultGatherer`, `promauto.New*`, `promhttp.Handler`), функции и клиенты пакета `http` по умолчанию, глобальные провайдеры `otel`, `os/signal`, окружение (`os`, `syscall`, `golang.org/x/sys`), функции пакета `flag`, `os.Stdout`/`Stderr`/`Stdin`, `os.TempDir`/`CreateTemp`/`MkdirTemp`, `runtime/debug.Set*`, `runtime.GOMAXPROCS` и смена рабочего каталога; пустой импорт `expvar`, `net/http/pprof`, `golang.org/x/net/trace`, `grpclog/glogger`, `glog`, `klog`, `automaxprocs`, `automemlimit` — с тестом `scripts/test_lint_policy.py` (правило версии пробного модуля выбирается по каждому модулю: prometheus, grpc и x/sys обязаны быть в `go.mod` и совпасть с ним точно; модуль из `HAND_PINNED`, который есть в `go.mod`, должен совпасть точно с большей из версий `go.mod` и ручной; модуля нет в `go.mod` — ручная версия минимальная, `go mod tidy` может её поднять, но не понизить; сравнение по semver и выбор правила — с unit-тестами). Защита CI FIN-301: jobs `lint`, `api`, `migrations` не сохраняют токен checkout, `base_ref` передаётся в скрипт через окружение, тест `scripts/test_workflow_hardening.py`. Формулировки FIN-307 в `docs/releasing.md` и вступлении CHANGELOG: строка в `[Unreleased]` от каждого PR, включая документацию, тесты и CI; заголовок PR выпуска — с ключом FIN; сводка ботских изменений `go.mod` — в PR выпуска. Нарушений новых запретов в коде библиотеки не найдено; runtime и экспортируемый API не менялись.
 - FIN-312: записи, вошедшие в уже выпущенный тег v0.1.0, перенесены из «Unreleased» в секцию v0.1.0; в docs/releasing.md записано исключение для GitHub Release v0.1.0. Runtime, API и теги не изменены.
 
 ## [v0.1.0] — 2026-10-22
