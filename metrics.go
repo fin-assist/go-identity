@@ -55,7 +55,7 @@ func (m *Metrics) Reject(kind, reason string) {
 		kind = "access"
 	}
 	switch reason {
-	case "invalid", "expired", "signature", "audience", "issuer", "key_unavailable", "forbidden", "user_id":
+	case "invalid", "expired", "signature", "audience", "issuer", "key_unavailable", "unknown_key", "forbidden", "user_id":
 	default:
 		reason = "invalid"
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/fin-assist/contracts/gen/go/finerr"
 	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/codes"
 )
 
 const maxToken = 16 << 10
@@ -51,12 +52,19 @@ func newVerifier(o VerifyOptions, algorithms []string, key func(context.Context,
 	return verifier{o, algorithms, key}, nil
 }
 
+// errInvalidToken is the verdict for a token that is malformed, forged,
+// expired, foreign or signed with a key absent from a fresh snapshot.
+var errInvalidToken = errors.New("identity: invalid token")
+
+// parse returns the verified claims and kid, or one of errInvalidToken,
+// errKeysUnavailable and a context error. Only errInvalidToken judges the token.
 func (v verifier) parse(ctx context.Context, raw, kind string) (*claims, string, error) {
 	reason := "invalid"
 	if len(raw) == 0 || len(raw) > maxToken {
 		v.reject(kind, reason)
-		return nil, "", errors.New("identity: invalid token")
+		return nil, "", errInvalidToken
 	}
+	var keyErr error
 	c := new(claims)
 	t, err := jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
 		kid, ok := t.Header["kid"].(string)
@@ -69,7 +77,7 @@ func (v verifier) parse(ctx context.Context, raw, kind string) (*claims, string,
 		}
 		k, err := v.key(ctx, kid)
 		if err != nil {
-			reason = "key_unavailable"
+			keyErr = err
 			return nil, err
 		}
 		if k.algorithm != t.Method.Alg() {
@@ -77,6 +85,18 @@ func (v verifier) parse(ctx context.Context, raw, kind string) (*claims, string,
 		}
 		return k.public, nil
 	}, jwt.WithValidMethods(v.algorithms), jwt.WithExpirationRequired(), jwt.WithIssuer(v.options.Issuer), jwt.WithAudience(v.options.Audience), jwt.WithTimeFunc(v.options.Clock), jwt.WithIssuedAt(), jwt.WithLeeway(clockSkew))
+	switch {
+	case keyErr == nil:
+	case errors.Is(keyErr, context.Canceled) || errors.Is(keyErr, context.DeadlineExceeded):
+		// The caller went away; this is neither a verdict nor a key outage.
+		return nil, "", keyErr
+	case errors.Is(keyErr, errUnknownKey):
+		reason = "unknown_key"
+	default:
+		// No fresh trusted snapshot: the token was not judged at all.
+		v.reject(kind, "key_unavailable")
+		return nil, "", errKeysUnavailable
+	}
 	// Apply skew only to iat/nbf, never extend the access/service expiration.
 	if err == nil && t.Valid && !v.options.Clock().Before(c.ExpiresAt.Time) {
 		err = jwt.ErrTokenExpired
@@ -85,7 +105,7 @@ func (v verifier) parse(ctx context.Context, raw, kind string) (*claims, string,
 		kid, _ := t.Header["kid"].(string)
 		return c, kid, nil
 	}
-	if err != nil {
+	if err != nil && keyErr == nil {
 		switch {
 		case errors.Is(err, jwt.ErrTokenSignatureInvalid):
 			reason = "signature"
@@ -98,7 +118,21 @@ func (v verifier) parse(ctx context.Context, raw, kind string) (*claims, string,
 		}
 	}
 	v.reject(kind, reason)
-	return nil, "", errors.New("identity: invalid token")
+	return nil, "", errInvalidToken
+}
+
+// verifierStatus maps a parse error that is not a verdict on the token to a bare
+// retryable gRPC status; it returns nil for errInvalidToken.
+func verifierStatus(err error) error {
+	switch {
+	case errors.Is(err, errKeysUnavailable):
+		return internalStatus(codes.Unavailable)
+	case errors.Is(err, context.DeadlineExceeded):
+		return internalStatus(codes.DeadlineExceeded)
+	case errors.Is(err, context.Canceled):
+		return internalStatus(codes.Canceled)
+	}
+	return nil
 }
 
 func (v verifier) reject(kind, reason string) {
@@ -112,6 +146,8 @@ type UserVerifier struct{ verifier }
 
 // NewUserVerifier requires trusted user keys. Expired and malformed access tokens
 // both become finerr.InvalidToken (TOKEN_EXPIRED is a registration-token error).
+// When no fresh key snapshot can be obtained, VerifyUser returns a bare
+// UNAVAILABLE instead: a key outage must not log users out.
 func NewUserVerifier(keys *KeyCache, o VerifyOptions) (*UserVerifier, error) {
 	if keys == nil {
 		return nil, errors.New("identity: user keys required")
@@ -123,10 +159,15 @@ func NewUserVerifier(keys *KeyCache, o VerifyOptions) (*UserVerifier, error) {
 	return &UserVerifier{v}, nil
 }
 
-// VerifyUser returns only a verified sub or finerr.InvalidToken().
+// VerifyUser returns a verified sub, finerr.InvalidToken() for a rejected token,
+// or a bare gRPC status without details when the token could not be judged:
+// UNAVAILABLE (no fresh trusted keys), CANCELED or DEADLINE_EXCEEDED (ctx ended).
 func (v *UserVerifier) VerifyUser(ctx context.Context, token string) (string, error) {
 	c, _, err := v.parse(ctx, token, "user")
 	if err != nil {
+		if s := verifierStatus(err); s != nil {
+			return "", s
+		}
 		return "", finerr.InvalidToken()
 	}
 	return c.Subject, nil
@@ -153,9 +194,14 @@ func NewKubernetesVerifier(keys *KeyCache, o VerifyOptions, namespace string) (*
 }
 
 // VerifyService returns a verified service name or a sanitized internal error.
+// A token that could not be judged yields a bare UNAVAILABLE, CANCELED or
+// DEADLINE_EXCEEDED status (see VerifyUser); Server passes it on unchanged.
 func (v *KubernetesVerifier) VerifyService(ctx context.Context, token string) (string, error) {
 	c, _, err := v.parse(ctx, token, "service")
 	if err != nil {
+		if s := verifierStatus(err); s != nil {
+			return "", s
+		}
 		return "", err
 	}
 	name := c.Kubernetes.ServiceAccount.Name
@@ -187,7 +233,7 @@ func NewStageVerifier(env string, o VerifyOptions, keys map[string]ed25519.Publi
 	v, err := newVerifier(o, []string{"EdDSA"}, func(_ context.Context, kid string) (verificationKey, error) {
 		k, ok := copyKeys[kid]
 		if !ok {
-			return verificationKey{}, errors.New("identity: unknown service key")
+			return verificationKey{}, errUnknownKey
 		}
 		return verificationKey{"EdDSA", k}, nil
 	})
@@ -202,6 +248,9 @@ func NewStageVerifier(env string, o VerifyOptions, keys map[string]ed25519.Publi
 func (v *StageVerifier) VerifyService(ctx context.Context, token string) (string, error) {
 	c, kid, err := v.parse(ctx, token, "service")
 	if err != nil {
+		if s := verifierStatus(err); s != nil {
+			return "", s
+		}
 		return "", err
 	}
 	if c.Subject != kid || c.IssuedAt == nil || c.ExpiresAt.Sub(c.IssuedAt.Time) <= 0 || c.ExpiresAt.Sub(c.IssuedAt.Time) > 5*time.Minute {
