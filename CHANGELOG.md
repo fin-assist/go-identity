@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+
+## [v0.2.1] — 2026-10-26
+
+### Изменено
+
+- FIN-341: правила lint о процессном состоянии приведены к ядру go-library-template (FIN-322): секции `forbidigo` и `depguard` в `.golangci.yml` и `scripts/test_lint_policy.py` совпадают с шаблоном. Добавлены запреты `slog.With` и `os.Exit`; сняты правила вне ядра: `grpclog` и `grpclog/glogger`, `prometheus.Unregister`, `http.DefaultTransport`/`DefaultServeMux`/`PostForm`, `otel.Tracer`/`Meter`/`Handle` и `otel/log/global`, `os.UserHomeDir`/`UserConfigDir`/`UserCacheDir`, `os.TempDir`/`CreateTemp`/`MkdirTemp`, `(*os.File).Chdir`, `runtime.SetDefaultGOMAXPROCS`, `syscall`/`golang.org/x/sys`; принцип в целом проверяется на ревью. Runtime и экспортируемый API не менялись.
+- FIN-334 (FIN-308, FIN-309): перенесены из go-library-template запреты `forbidigo`/`depguard` FIN-294 — стандартные логгеры (`fmt.Print*`, `slog`/`log` пакета, `grpclog`), глобальный реестр метрик (`prometheus.DefaultRegisterer`/`DefaultGatherer`, `promauto.New*`, `promhttp.Handler`), функции и клиенты пакета `http` по умолчанию, глобальные провайдеры `otel`, `os/signal`, окружение (`os`, `syscall`, `golang.org/x/sys`), функции пакета `flag`, `os.Stdout`/`Stderr`/`Stdin`, `os.TempDir`/`CreateTemp`/`MkdirTemp`, `runtime/debug.Set*`, `runtime.GOMAXPROCS` и смена рабочего каталога; пустой импорт `expvar`, `net/http/pprof`, `golang.org/x/net/trace`, `grpclog/glogger`, `glog`, `klog`, `automaxprocs`, `automemlimit` — с тестом `scripts/test_lint_policy.py` (правило версии пробного модуля выбирается по каждому модулю: prometheus, grpc и x/sys обязаны быть в `go.mod` и совпасть с ним точно; модуль из `HAND_PINNED`, который есть в `go.mod`, должен совпасть точно с большей из версий `go.mod` и ручной; модуля нет в `go.mod` — ручная версия минимальная, `go mod tidy` может её поднять, но не понизить; сравнение по semver и выбор правила — с unit-тестами). Защита CI FIN-301: jobs `lint`, `api`, `migrations` не сохраняют токен checkout, `base_ref` передаётся в скрипт через окружение, тест `scripts/test_workflow_hardening.py`. Формулировки FIN-307 в `docs/releasing.md` и вступлении CHANGELOG: строка в `[Unreleased]` от каждого PR, включая документацию, тесты и CI; заголовок PR выпуска — с ключом FIN; сводка ботских изменений `go.mod` — в PR выпуска. Нарушений новых запретов в коде библиотеки не найдено; runtime и экспортируемый API не менялись.
+- Обновления Renovate после v0.2.0: `contracts/gen/go` v0.4.0 → v0.5.0, тестовая зависимость `go-grpc` v0.1.0 → v0.2.0. Минимальные версии в графе модулей повышены; директива Go и мажорные пути зависимостей не менялись.
+
+### Исправлено
+
+- FIN-264: проверка версии в CI сохраняет сравнение с предыдущим выпуском при публикации тега во время gorelease; чужие и изменившиеся теги отклоняются. Runtime и публичный API не меняются.
+
+## [v0.2.0] — 2026-10-26
+
 ### Несовместимо
 
 - FIN-293: недоступность ключей проверки (нет свежего снимка JWKS пользователя или кластера) больше не выдаётся за невалидный токен: `VerifyUser`, `VerifyService`, `Server` и HTTP-middleware возвращают голый `UNAVAILABLE` без `ErrorInfo` вместо `INVALID_TOKEN` / голого `UNAUTHENTICATED`, отменённый или истёкший контекст — голый `CANCELED` / `DEADLINE_EXCEEDED`. Сбой `user` или API-сервера больше не разлогинивает клиентов. Сервисам код менять не нужно: `bank-bff` отвечает на неизвестную `finerr.ToREST` ошибку 500 `INTERNAL_ERROR`; если сервис сам сравнивает ошибку `VerifyUser` с `INVALID_TOKEN`, учтите новые коды. Метрика `finassist_identity_rejected_total` получила причину `unknown_key` (неизвестный `kid` в свежем снимке, раньше считался как `key_unavailable`); `key_unavailable` теперь только сбой источника ключей.
@@ -11,23 +26,13 @@
 ### Добавлено
 
 - FIN-273: `NewAssembly(AssemblyOptions)` — общая сборка проверки идентичности для сервисов вместо копий в `internal/app`: в `prod` — ServiceAccount Kubernetes (JWKS по HTTPS с CA и отдельным API-токеном, projected-токен для исходящих), в `stage` — короткие JWT с ключами из файлов (`kid` = сервис), в обоих — ключи пользователя через `user.GetSigningKeys` (или локальный провайдер в самом `user`), метрики и одно фоновое задание `Run`; `dev` и неизвестные окружения отклоняются. Значения по умолчанию совпадают с переменными `AUTH_*` assistant. Совместимо: только новые имена; тестовая зависимость `go-grpc v0.1.0` (usage-тест цепочки сервера) поднимает минимальную `prometheus/client_golang` до v1.25.0, как уже у сервисов.
-
 - FIN-311: `NewObservedKeyCache` и интерфейс `KeyObserver`; `Metrics` реализует его и регистрирует gauge `finassist_identity_jwks_skipped_keys{kind=user|service,reason=kty|crv|alg|use|key_ops|size}` — число JWK, пропущенных в текущем снимке. `NewKeyCache` не меняется.
-
 - FIN-243: по решению владельца только пакет internal/pgtest исключён из общего Go-списка инструментирования всех трёх уровней; его тесты продолжают выполняться, выбор пакетов и пустой список проверяются регрессионными тестами.
-
 - FIN-243: независимые unit/integration/consumer API пороги statements 80% с закреплённым go-test-coverage, проверкой непустого исполнения и штатными artifacts вместо изменённых строк; тесты и регламент проверок; тестовые gRPC-обработчики возвращают ошибки вместо FailNow в служебной goroutine.
 
 ### Изменено
 
-- FIN-341: правила lint о процессном состоянии приведены к ядру go-library-template (FIN-322): секции `forbidigo` и `depguard` в `.golangci.yml` и `scripts/test_lint_policy.py` совпадают с шаблоном. Добавлены запреты `slog.With` и `os.Exit`; сняты правила вне ядра: `grpclog` и `grpclog/glogger`, `prometheus.Unregister`, `http.DefaultTransport`/`DefaultServeMux`/`PostForm`, `otel.Tracer`/`Meter`/`Handle` и `otel/log/global`, `os.UserHomeDir`/`UserConfigDir`/`UserCacheDir`, `os.TempDir`/`CreateTemp`/`MkdirTemp`, `(*os.File).Chdir`, `runtime.SetDefaultGOMAXPROCS`, `syscall`/`golang.org/x/sys`; принцип в целом проверяется на ревью. Runtime и экспортируемый API не менялись.
-- FIN-334 (FIN-308, FIN-309): перенесены из go-library-template запреты `forbidigo`/`depguard` FIN-294 — стандартные логгеры (`fmt.Print*`, `slog`/`log` пакета, `grpclog`), глобальный реестр метрик (`prometheus.DefaultRegisterer`/`DefaultGatherer`, `promauto.New*`, `promhttp.Handler`), функции и клиенты пакета `http` по умолчанию, глобальные провайдеры `otel`, `os/signal`, окружение (`os`, `syscall`, `golang.org/x/sys`), функции пакета `flag`, `os.Stdout`/`Stderr`/`Stdin`, `os.TempDir`/`CreateTemp`/`MkdirTemp`, `runtime/debug.Set*`, `runtime.GOMAXPROCS` и смена рабочего каталога; пустой импорт `expvar`, `net/http/pprof`, `golang.org/x/net/trace`, `grpclog/glogger`, `glog`, `klog`, `automaxprocs`, `automemlimit` — с тестом `scripts/test_lint_policy.py` (правило версии пробного модуля выбирается по каждому модулю: prometheus, grpc и x/sys обязаны быть в `go.mod` и совпасть с ним точно; модуль из `HAND_PINNED`, который есть в `go.mod`, должен совпасть точно с большей из версий `go.mod` и ручной; модуля нет в `go.mod` — ручная версия минимальная, `go mod tidy` может её поднять, но не понизить; сравнение по semver и выбор правила — с unit-тестами). Защита CI FIN-301: jobs `lint`, `api`, `migrations` не сохраняют токен checkout, `base_ref` передаётся в скрипт через окружение, тест `scripts/test_workflow_hardening.py`. Формулировки FIN-307 в `docs/releasing.md` и вступлении CHANGELOG: строка в `[Unreleased]` от каждого PR, включая документацию, тесты и CI; заголовок PR выпуска — с ключом FIN; сводка ботских изменений `go.mod` — в PR выпуска. Нарушений новых запретов в коде библиотеки не найдено; runtime и экспортируемый API не менялись.
 - FIN-312: записи, вошедшие в уже выпущенный тег v0.1.0, перенесены из «Unreleased» в секцию v0.1.0; в docs/releasing.md записано исключение для GitHub Release v0.1.0. Runtime, API и теги не изменены.
-
-### Исправлено
-
-- FIN-264: проверка версии в CI сохраняет сравнение с предыдущим выпуском при публикации тега во время gorelease; чужие и изменившиеся теги отклоняются. Runtime и публичный API не меняются.
-
 
 ## [v0.1.0] — 2026-10-22
 
