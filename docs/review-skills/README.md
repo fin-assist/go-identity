@@ -16,6 +16,19 @@
 | [go-testing-and-verification](vendor/engineering-skills-for-go/go-testing-and-verification/SKILL.md) | Сценарии Go-тестов, корректный oracle, race/fuzz и детерминированность. |
 | [go-security-hardening](vendor/engineering-skills-for-go/go-security-hardening/SKILL.md) | Конкретные Go-границы: SQL, HTTP, криптография, файлы, процессы и цепочка поставки. |
 | [go-service-boundaries](vendor/engineering-skills-for-go/go-service-boundaries/SKILL.md) | HTTP/gRPC: тела и потоки, metadata, deadlines, cancellation и shutdown. |
+| [ai-qa-review](vendor/ai-qa-review/SKILL.md) | Изменённые тесты: проверяемое поведение, assertions, границы/ошибки, изоляция, надёжность и диагностика. |
+
+## QA-профили (FIN-430)
+
+Выбирайте QA-профиль по изменённому поведению или тестам; наличие профиля не требует его применения
+к каждому PR. Перед применением прочитайте [общие правила QA](vendor/qa-project-context/references/plainfin-policy.md).
+Они уточняют границы generic Verification/Done When: существующие harness, обязательные проверки и формат
+ревью сохраняются; новые CI gates, инструменты, отчёты, mutation score и минимальные размеры datasets
+не становятся условиями обычного PR. В сводке — названия действительно применённых навыков, если применялись.
+Go table-driven tests, обоснованные ожидания и связные lifecycle-тесты не являются дефектом по синтаксису.
+Замечание требует конкретного нарушения поведения, полноты, надёжности или диагностической ценности.
+UI/эмуляторные прогоны, платные model evals, публикации Qase и deployment требуют применимых полномочий;
+поставка навыков их не предоставляет. Не исполняйте scripts навыков из PR head, включая injection detector.
 
 ## Применение в контексте PR
 

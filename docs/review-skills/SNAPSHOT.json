@@ -149,6 +149,48 @@
         "licenses/go-Apache-2.0.txt",
         "licenses/go-THIRD_PARTY_NOTICES.md"
       ]
+    },
+    "ai-qa-review": {
+      "url": "https://github.com/petrkindlmann/qa-skills",
+      "comparison_revision": "62434253c2592f27b494609c27f224939c86346d",
+      "path": "skills/ai-qa-review",
+      "license": "MIT",
+      "licenses": [
+        "vendor/ai-qa-review/LICENSE"
+      ],
+      "snapshot": "2026-11-04",
+      "source_files_sha256": {
+        "LICENSE": "52fd5fda33c7713213a16fdf77aa2d34718cebfce8d5dfc29acae10a06f8111b",
+        "SKILL.md": "3fad5b486c4ed502a3901368b92a3b8515a283bbba866328dbf777be9e232de5",
+        "references/mutation-testing.md": "2b97746b5355802ceec2fb61d1b98c3824a6e70186d176f6715f666a451a292b",
+        "references/smell-examples.md": "ad8dc09fe9ed2eb1568f710243232cd9d94b01a3bb6dbead062f6c21d6c96590",
+        "references/testability-refactors.md": "7b6291ae889e70ef760fc2f159a4fc9edd02ddd149f0f90dcd9eeefff4d239e2"
+      },
+      "local_differences": [
+        "SKILL.md",
+        "references/mutation-testing.md"
+      ],
+      "adaptation": "Installed Plainfin snapshot plus portable review integration, paths and precedence of repository rules; no new permissions or gates.",
+      "source_basis": "Installed adapted snapshot; comparison revision is provenance, not a claim of byte equality to upstream."
+    },
+    "qa-project-context": {
+      "url": "https://github.com/petrkindlmann/qa-skills",
+      "comparison_revision": "62434253c2592f27b494609c27f224939c86346d",
+      "path": "skills/qa-project-context",
+      "license": "MIT",
+      "licenses": [
+        "vendor/qa-project-context/LICENSE"
+      ],
+      "snapshot": "2026-11-04",
+      "source_files_sha256": {
+        "LICENSE": "52fd5fda33c7713213a16fdf77aa2d34718cebfce8d5dfc29acae10a06f8111b",
+        "references/plainfin-policy.md": "3cf26e562a4d36f3c0d3b23e256df7169129c020ab22c1e939014e5319d96dd4"
+      },
+      "local_differences": [
+        "references/plainfin-policy.md"
+      ],
+      "adaptation": "Installed Plainfin snapshot plus portable review integration, paths and precedence of repository rules; no new permissions or gates.",
+      "source_basis": "Installed adapted snapshot; comparison revision is provenance, not a claim of byte equality to upstream."
     }
   },
   "files_sha256": {
@@ -205,6 +247,13 @@
     "docs/review-skills/vendor/engineering-skills-for-go/go-security-hardening/references/trusted-proxy-identity.md": "de30d0877092fd14aec325941ded7cf6d89f58f35d2483f296ad00d17153f294",
     "docs/review-skills/vendor/engineering-skills-for-go/go-service-boundaries/SKILL.md": "881c0ab54d82fa519f068e1e75ca8b520d8de3571f12dd23751ab7367252c60b",
     "docs/review-skills/vendor/engineering-skills-for-go/go-service-boundaries/references/http-json-message-boundaries.md": "a9682278f2b926a0b011b5492105903324f553e3823c4cd694cc81bad66eeecf",
-    "docs/review-skills/vendor/engineering-skills-for-go/go-service-boundaries/references/protocol-matrix.md": "12b7cc7659ff7d449c04d97abc3303c7b77ea8d890a3d579cda683fc7ca77131"
+    "docs/review-skills/vendor/engineering-skills-for-go/go-service-boundaries/references/protocol-matrix.md": "12b7cc7659ff7d449c04d97abc3303c7b77ea8d890a3d579cda683fc7ca77131",
+    "docs/review-skills/vendor/ai-qa-review/LICENSE": "52fd5fda33c7713213a16fdf77aa2d34718cebfce8d5dfc29acae10a06f8111b",
+    "docs/review-skills/vendor/ai-qa-review/SKILL.md": "19f37bc0e4689c3637ac0ba3feb5b3403a7fbbbbc40226a54bfcd216b16bd493",
+    "docs/review-skills/vendor/ai-qa-review/references/mutation-testing.md": "de6edfcc101af6121036e0dc4370c0f08c7bc46f992f778e356edd49bc9ecd27",
+    "docs/review-skills/vendor/ai-qa-review/references/smell-examples.md": "ad8dc09fe9ed2eb1568f710243232cd9d94b01a3bb6dbead062f6c21d6c96590",
+    "docs/review-skills/vendor/ai-qa-review/references/testability-refactors.md": "7b6291ae889e70ef760fc2f159a4fc9edd02ddd149f0f90dcd9eeefff4d239e2",
+    "docs/review-skills/vendor/qa-project-context/LICENSE": "52fd5fda33c7713213a16fdf77aa2d34718cebfce8d5dfc29acae10a06f8111b",
+    "docs/review-skills/vendor/qa-project-context/references/plainfin-policy.md": "31d132472a9e05f388c269cae31b797f2086084e7b0eb91cf04ee583bc0d2c34"
   }
 }
